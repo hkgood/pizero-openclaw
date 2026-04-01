@@ -1,4 +1,4 @@
-"""OpenAI TTS playback with pre-fetching for gapless sentence transitions."""
+"""Text-to-speech with MiniMax (or OpenAI fallback), pre-fetching for gapless sentence transitions."""
 
 import math
 import queue
@@ -55,13 +55,11 @@ class TTSPlayer:
         words = text.split()
         if not words:
             return ""
-        # Offset to account for audio pipeline latency so text doesn't lead the voice
         elapsed = time.monotonic() - self._playback_start - 0.25
         if elapsed < 0:
             return ""
         progress = min(1.0, elapsed / self._playback_duration)
         word_idx = min(int(progress * len(words)), len(words) - 1)
-        # Trailing window: show the word being spoken and the few before it
         end = word_idx + 1
         start = max(0, end - 4)
         return " ".join(words[start:end])
@@ -106,7 +104,7 @@ class TTSPlayer:
         self._mouth_timeline = []
         self.is_speaking.clear()
 
-    # ── Fetcher thread: download WAVs ahead of playback ──────────
+    # ── Fetcher thread ────────────────────────────────────────────────────────
 
     def _fetch_loop(self) -> None:
         while True:
@@ -133,6 +131,59 @@ class TTSPlayer:
                 print(f"[tts] skipping sentence (fetch failed): {text[:40]}")
 
     def _fetch_wav(self, text: str) -> bytes | None:
+        provider = getattr(config, "TTS_PROVIDER", "openai")
+        if provider == "minimax":
+            return self._fetch_wav_minimax(text)
+        else:
+            return self._fetch_wav_openai(text)
+
+    def _fetch_wav_minimax(self, text: str) -> bytes | None:
+        """Fetch TTS WAV from MiniMax API."""
+        if not config.MINIMAX_API_KEY:
+            print("[tts/minimax] MINIMAX_API_KEY not set, skipping")
+            return None
+
+        url = f"{config.MINIMAX_API_BASE}/v1/audio/speech"
+        headers = {
+            "Authorization": f"Bearer {config.MINIMAX_API_KEY}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": config.MINIMAX_TTS_MODEL,
+            "voice": config.MINIMAX_TTS_VOICE,
+            "input": text,
+            "response_format": "wav",
+            "speed": max(0.5, min(2.0, config.MINIMAX_TTS_SPEED)),
+            "volume": max(0.0, min(2.0, config.MINIMAX_TTS_VOLUME)),
+            "pitch": config.MINIMAX_TTS_PITCH,
+        }
+        try:
+            resp = requests.post(url, json=payload, headers=headers, stream=True, timeout=30)
+        except Exception as e:
+            print(f"[tts/minimax] request failed: {e}")
+            return None
+        if resp.status_code != 200:
+            print(f"[tts/minimax] API error {resp.status_code}: {resp.text[:200]}")
+            return None
+
+        wav_data = b"".join(resp.iter_content(chunk_size=4096))
+
+        # Apply volume boost via sox if available
+        gain_db = getattr(config, "MINIMAX_TTS_GAIN_DB", 9)
+        if gain_db > 0:
+            try:
+                r = subprocess.run(
+                    ["sox", "-t", "wav", "-", "-t", "wav", "-", "gain", str(gain_db)],
+                    input=wav_data, capture_output=True, timeout=30, check=False,
+                )
+                if r.returncode == 0 and r.stdout:
+                    wav_data = r.stdout
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                pass
+        return wav_data
+
+    def _fetch_wav_openai(self, text: str) -> bytes | None:
+        """Fetch TTS WAV from OpenAI API (original implementation)."""
         url = "https://api.openai.com/v1/audio/speech"
         headers = {
             "Authorization": f"Bearer {config.OPENAI_API_KEY}",
@@ -150,10 +201,10 @@ class TTSPlayer:
         try:
             resp = requests.post(url, json=payload, headers=headers, stream=True, timeout=30)
         except Exception as e:
-            print(f"[tts] request failed: {e}")
+            print(f"[tts/openai] request failed: {e}")
             return None
         if resp.status_code != 200:
-            print(f"[tts] API error {resp.status_code}: {resp.text[:200]}")
+            print(f"[tts/openai] API error {resp.status_code}: {resp.text[:200]}")
             return None
 
         wav_data = b"".join(resp.iter_content(chunk_size=4096))
@@ -171,7 +222,7 @@ class TTSPlayer:
                 pass
         return wav_data
 
-    # ── Player thread: play pre-fetched WAVs back to back ────────
+    # ── Player thread ─────────────────────────────────────────────────────────
 
     def _play_loop(self) -> None:
         while True:
