@@ -1,36 +1,32 @@
-import os
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
+"""Speech-to-text via Bailian/DashScope FunASR (cloud) or OpenAI Whisper."""
 
+import os
+import time
 import config
 
-_http_session: requests.Session | None = None
+# ── Provider selection ─────────────────────────────────────────────────────────
+_providers = {"funasr", "openai", "dryrun"}
 
 
-def _get_session() -> requests.Session:
-    global _http_session
-    if _http_session is None:
-        _http_session = requests.Session()
-        retry = Retry(
-            total=3,
-            backoff_factor=0.3,
-            status_forcelist=[502, 503, 504],
-            allowed_methods=["POST"],
-        )
-        adapter = HTTPAdapter(max_retries=retry)
-        _http_session.mount("http://", adapter)
-        _http_session.mount("https://", adapter)
-    return _http_session
+def _provider() -> str:
+    p = (getattr(config, "STT_PROVIDER", "") or "funasr").lower().strip()
+    if p not in _providers:
+        print(f"[transcribe] unknown STT_PROVIDER={p!r}, defaulting to funasr")
+        p = "funasr"
+    return p
 
 
 def transcribe(wav_path: str) -> str:
-    """Transcribe a WAV file using MiniMax STT (or OpenAI as fallback).
+    """Transcribe a WAV file to text.
 
-    In dry-run mode (no API key), prompts for typed input instead.
-    Provider is selected via config.STT_PROVIDER ("minimax" or "openai").
+    Provider is selected via config.STT_PROVIDER:
+      funasr  — Bailian FunASR cloud (default)
+      openai  — OpenAI Whisper API
+      dryrun  — type input manually
     """
-    if config.DRY_RUN:
+    p = _provider()
+
+    if p == "dryrun" or (p == "funasr" and config.DRY_RUN):
         print("[transcribe] DRY RUN — type your message:")
         try:
             return input("> ").strip()
@@ -44,74 +40,159 @@ def transcribe(wav_path: str) -> str:
     if file_size < 100:
         raise ValueError(f"WAV file too small ({file_size} bytes), likely empty recording")
 
-    provider = getattr(config, "STT_PROVIDER", "openai")
-    if provider == "minimax":
-        return _transcribe_minimax(wav_path)
+    if p == "funasr":
+        return _transcribe_funasr(wav_path)
     else:
         return _transcribe_openai(wav_path)
 
 
-def _transcribe_minimax(wav_path: str) -> str:
-    """Transcribe via MiniMax Speech-to-Text API (OpenAI-compatible)."""
-    if not config.MINIMAX_API_KEY:
-        raise RuntimeError("MINIMAX_API_KEY not set — switch to OpenAI or set STT_PROVIDER=openai")
+# ── Bailian FunASR (cloud WebSocket via dashscope SDK) ─────────────────────
 
-    # MiniMax OpenAI-compatible audio transcriptions endpoint
-    url = f"{config.MINIMAX_API_BASE}/v1/audio/transcriptions"
-    headers = {"Authorization": f"Bearer {config.MINIMAX_API_KEY}"}
+class _FunASRCallback:
+    """Collects transcripts from the FunASR WebSocket stream."""
 
-    with open(wav_path, "rb") as f:
-        try:
-            resp = _get_session().post(
-                url,
-                headers=headers,
-                files={"file": ("utterance.wav", f, "audio/wav")},
-                data={
-                    "model": config.MINIMAX_STT_MODEL,
-                    "response_format": "text",
-                },
-                timeout=30,
-            )
-        except (requests.ConnectionError, requests.Timeout) as e:
-            raise RuntimeError(f"Transcription request failed: {e}") from e
+    def __init__(self):
+        self._texts: list[str] = []
+        self._done = False
+        self._error: Exception | None = None
 
-    if resp.status_code != 200:
+    def on_open(self) -> None:
+        pass
+
+    def on_close(self) -> None:
+        pass
+
+    def on_complete(self) -> None:
+        self._done = True
+
+    def on_error(self, message) -> None:
+        self._error = RuntimeError(f"FunASR error: {message.message}")
+        self._done = True
+
+    def on_event(self, result) -> None:
+        from dashscope.audio.asr import RecognitionResult
+        sentence = result.get_sentence()
+        if "text" in sentence:
+            text = sentence["text"].strip()
+            if text:
+                self._texts.append(text)
+
+    @property
+    def texts(self) -> list[str]:
+        return self._texts
+
+    @property
+    def error(self) -> Exception | None:
+        return self._error
+
+
+def _transcribe_funasr(wav_path: str) -> str:
+    """Transcribe via Bailian FunASR cloud (WebSocket SDK)."""
+    try:
+        import dashscope
+        from dashscope.audio.asr import Recognition, RecognitionCallback
+    except ImportError:
         raise RuntimeError(
-            f"Minimax transcription failed ({resp.status_code}): {resp.text[:300]}"
+            "dashscope SDK not installed. Run: pip install dashscope"
         )
 
-    transcript = resp.text.strip()
-    print(f"[transcribe/minimax] result: {transcript[:120]}")
+    # Configure dashscope
+    api_key = getattr(config, "DASHSCOPE_API_KEY", "")
+    if not api_key:
+        raise RuntimeError("DASHSCOPE_API_KEY not set")
+    dashscope.api_key = api_key
+
+    base_url = getattr(config, "DASHSCOPE_API_BASE", "https://dashscope.aliyuncs.com")
+    # Convert HTTPS REST URL to WebSocket URL
+    ws_base = base_url.replace("https://", "wss://").replace("http://", "ws://")
+    dashscope.base_websocket_api_url = ws_base + "/api-ws/v1/inference"
+
+    callback = _FunASRCallback()
+
+    recognition = Recognition(
+        model="fun-asr-realtime",
+        format="wav",
+        sample_rate=16000,
+        callback=callback,
+        semantic_punctuation_enabled=False,
+    )
+
+    recognition.start()
+
+    with open(wav_path, "rb") as f:
+        file_buffer = f.read()
+
+    buffer_size = len(file_buffer)
+    offset = 0
+    chunk_size = 3200  # 100ms of 16kHz/16bit mono audio
+
+    while offset < buffer_size:
+        remaining = buffer_size - offset
+        current_chunk = min(chunk_size, remaining)
+        chunk_data = file_buffer[offset:offset + current_chunk]
+        recognition.send_audio_frame(chunk_data)
+        offset += current_chunk
+        # Small delay to avoid overwhelming the WebSocket
+        time.sleep(0.01)
+
+    recognition.stop()
+
+    # Wait for callback to finish (with timeout)
+    timeout = 30
+    t0 = time.time()
+    while not callback._done and (time.time() - t0) < timeout:
+        time.sleep(0.1)
+
+    if callback.error:
+        raise callback.error
+
+    transcript = " ".join(callback.texts).strip()
+    print(f"[transcribe/funasr] result: {transcript[:120]}")
     return transcript
 
 
+# ── OpenAI Whisper (fallback) ─────────────────────────────────────────────────
+
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+_http_session: requests.Session | None = None
+
+
+def _get_session() -> requests.Session:
+    global _http_session
+    if _http_session is None:
+        _http_session = requests.Session()
+        retry = Retry(total=3, backoff_factor=0.3, status_forcelist=[502, 503, 504], allowed_methods=["POST"])
+        adapter = HTTPAdapter(max_retries=retry)
+        _http_session.mount("http://", adapter)
+        _http_session.mount("https://", adapter)
+    return _http_session
+
+
 def _transcribe_openai(wav_path: str) -> str:
-    """Transcribe via OpenAI Audio Transcriptions API."""
-    if not config.OPENAI_API_KEY:
+    """Transcribe via OpenAI Whisper API."""
+    api_key = getattr(config, "OPENAI_API_KEY", "")
+    model = getattr(config, "OPENAI_TRANSCRIBE_MODEL", "whisper-1")
+    if not api_key:
         raise RuntimeError("OPENAI_API_KEY not set")
 
     url = "https://api.openai.com/v1/audio/transcriptions"
-    headers = {"Authorization": f"Bearer {config.OPENAI_API_KEY}"}
-
+    headers = {"Authorization": f"Bearer {api_key}"}
     with open(wav_path, "rb") as f:
         try:
             resp = _get_session().post(
-                url,
-                headers=headers,
+                url, headers=headers,
                 files={"file": ("utterance.wav", f, "audio/wav")},
-                data={
-                    "model": config.OPENAI_TRANSCRIBE_MODEL,
-                    "response_format": "text",
-                },
+                data={"model": model, "response_format": "text"},
                 timeout=30,
             )
         except (requests.ConnectionError, requests.Timeout) as e:
             raise RuntimeError(f"Transcription request failed: {e}") from e
 
     if resp.status_code != 200:
-        raise RuntimeError(
-            f"Transcription failed ({resp.status_code}): {resp.text[:300]}"
-        )
+        raise RuntimeError(f"Transcription failed ({resp.status_code}): {resp.text[:300]}")
 
     transcript = resp.text.strip()
     print(f"[transcribe/openai] result: {transcript[:120]}")

@@ -4,13 +4,28 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+# ── Adjust these to match your setup ──────────────────────────────────────
+# User and group to run as (set to your actual username, e.g. rocky)
 User=pi
+Group=pi
+# Path to the project (set to where you cloned pizero-openclaw)
 WorkingDirectory=/home/pi/pizero-openclaw
+# Python executable — use venv python if you created one, e.g.:
+#   ExecStart=/home/pi/pizero-openclaw/.venv/bin/python main.py
+ExecStart=/usr/bin/python3 /home/pi/pizero-openclaw/main.py
+# ───────────────────────────────────────────────────────────────────────────
+
+# Load env vars from .env (python-dotenv loads them in config.py;
+# systemd expects KEY=value without 'export', which .env.example has)
+# If your .env uses 'export', use the wrapper script instead (see README).
 EnvironmentFile=/home/pi/pizero-openclaw/.env
-ExecStart=/usr/bin/python3 main.py
+
 Restart=on-failure
 RestartSec=5
+
+# Log to journal (captured by journalctl) + optional file
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target

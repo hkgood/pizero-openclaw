@@ -1,4 +1,4 @@
-"""Text-to-speech with MiniMax (or OpenAI fallback), pre-fetching for gapless sentence transitions."""
+"""Text-to-speech with Bailian (Qwen TTS), pre-fetching for gapless sentence transitions."""
 
 import math
 import queue
@@ -131,45 +131,103 @@ class TTSPlayer:
                 print(f"[tts] skipping sentence (fetch failed): {text[:40]}")
 
     def _fetch_wav(self, text: str) -> bytes | None:
-        provider = getattr(config, "TTS_PROVIDER", "openai")
-        if provider == "minimax":
-            return self._fetch_wav_minimax(text)
-        else:
+        provider = getattr(config, "TTS_PROVIDER", "bailian")
+        if provider == "bailian":
+            return self._fetch_wav_bailian(text)
+        elif provider == "openai":
             return self._fetch_wav_openai(text)
-
-    def _fetch_wav_minimax(self, text: str) -> bytes | None:
-        """Fetch TTS WAV from MiniMax API."""
-        if not config.MINIMAX_API_KEY:
-            print("[tts/minimax] MINIMAX_API_KEY not set, skipping")
+        else:
+            print(f"[tts] unknown TTS_PROVIDER={provider}, skipping")
             return None
 
-        url = f"{config.MINIMAX_API_BASE}/v1/audio/speech"
+    # ── Bailian Qwen TTS ─────────────────────────────────────────────────────
+
+    def _fetch_wav_bailian(self, text: str) -> bytes | None:
+        """Fetch TTS WAV from Bailian (DashScope) Qwen TTS API.
+
+        Uses non-SSE REST API:
+          POST https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation
+        """
+        api_key = getattr(config, "DASHSCOPE_API_KEY", "")
+        if not api_key:
+            print("[tts/bailian] DASHSCOPE_API_KEY not set, skipping")
+            return None
+
+        base_url = getattr(config, "DASHSCOPE_API_BASE", "https://dashscope.aliyuncs.com")
+        model = getattr(config, "BAILIAN_TTS_MODEL", "qwen3-tts-flash")
+        voice = getattr(config, "BAILIAN_TTS_VOICE", "Cherry")
+        speed = getattr(config, "BAILIAN_TTS_SPEED", 1.0)
+
+        url = f"{base_url}/api/v1/services/aigc/multimodal-generation/generation"
         headers = {
-            "Authorization": f"Bearer {config.MINIMAX_API_KEY}",
+            "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
         payload = {
-            "model": config.MINIMAX_TTS_MODEL,
-            "voice": config.MINIMAX_TTS_VOICE,
-            "input": text,
-            "response_format": "wav",
-            "speed": max(0.5, min(2.0, config.MINIMAX_TTS_SPEED)),
-            "volume": max(0.0, min(2.0, config.MINIMAX_TTS_VOLUME)),
-            "pitch": config.MINIMAX_TTS_PITCH,
+            "model": model,
+            "input": {
+                "text": text,
+                "voice": voice,
+                "language_type": "Chinese",
+            },
+            "parameters": {
+                "speed_ratio": speed,
+                "output_audio": {
+                    "audio_format": "wav",
+                },
+            },
         }
+
         try:
-            resp = requests.post(url, json=payload, headers=headers, stream=True, timeout=30)
+            resp = requests.post(url, json=payload, headers=headers, timeout=30)
         except Exception as e:
-            print(f"[tts/minimax] request failed: {e}")
-            return None
-        if resp.status_code != 200:
-            print(f"[tts/minimax] API error {resp.status_code}: {resp.text[:200]}")
+            print(f"[tts/bailian] request failed: {e}")
             return None
 
-        wav_data = b"".join(resp.iter_content(chunk_size=4096))
+        if resp.status_code != 200:
+            print(f"[tts/bailian] API error {resp.status_code}: {resp.text[:300]}")
+            return None
+
+        # Response is a JSON object with audio data
+        try:
+            data = resp.json()
+        except Exception:
+            print("[tts/bailian] failed to parse JSON response")
+            return None
+
+        # The audio may be returned as base64 in output_audio.audio_data
+        audio_data = (
+            data.get("output", {})
+            .get("audio", {})
+            .get("audio_data")
+        )
+        if not audio_data:
+            # Fallback: check for URL in output
+            audio_url = (
+                data.get("output", {})
+                .get("audio", {})
+                .get("audio_url")
+            )
+            if audio_url:
+                # Download from URL
+                try:
+                    audio_resp = requests.get(audio_url, timeout=30)
+                    if audio_resp.status_code == 200:
+                        return audio_resp.content
+                except Exception as e:
+                    print(f"[tts/bailian] failed to download audio from URL: {e}")
+            print(f"[tts/bailian] no audio data in response: {str(data)[:200]}")
+            return None
+
+        import base64
+        try:
+            wav_data = base64.b64decode(audio_data)
+        except Exception as e:
+            print(f"[tts/bailian] failed to decode base64 audio: {e}")
+            return None
 
         # Apply volume boost via sox if available
-        gain_db = getattr(config, "MINIMAX_TTS_GAIN_DB", 9)
+        gain_db = getattr(config, "BAILIAN_TTS_GAIN_DB", 9)
         if gain_db > 0:
             try:
                 r = subprocess.run(
@@ -180,36 +238,50 @@ class TTSPlayer:
                     wav_data = r.stdout
             except (FileNotFoundError, subprocess.TimeoutExpired):
                 pass
+
         return wav_data
 
+    # ── OpenAI TTS (fallback) ────────────────────────────────────────────────
+
     def _fetch_wav_openai(self, text: str) -> bytes | None:
-        """Fetch TTS WAV from OpenAI API (original implementation)."""
+        """Fetch TTS WAV from OpenAI API."""
+        api_key = getattr(config, "OPENAI_API_KEY", "")
+        model = getattr(config, "OPENAI_TTS_MODEL", "tts-1")
+        voice = getattr(config, "OPENAI_TTS_VOICE", "coral")
+        speed = getattr(config, "OPENAI_TTS_SPEED", 1.1)
+
+        if not api_key:
+            print("[tts/openai] OPENAI_API_KEY not set, skipping")
+            return None
+
         url = "https://api.openai.com/v1/audio/speech"
         headers = {
-            "Authorization": f"Bearer {config.OPENAI_API_KEY}",
+            "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
         payload = {
-            "model": config.OPENAI_TTS_MODEL,
-            "voice": config.OPENAI_TTS_VOICE,
+            "model": model,
+            "voice": voice,
             "input": text,
             "response_format": "wav",
-            "speed": max(0.25, min(4.0, config.OPENAI_TTS_SPEED)),
+            "speed": max(0.25, min(4.0, speed)),
         }
         if hasattr(config, "OPENAI_TTS_INSTRUCTIONS") and config.OPENAI_TTS_INSTRUCTIONS:
             payload["instructions"] = config.OPENAI_TTS_INSTRUCTIONS
+
         try:
             resp = requests.post(url, json=payload, headers=headers, stream=True, timeout=30)
         except Exception as e:
             print(f"[tts/openai] request failed: {e}")
             return None
+
         if resp.status_code != 200:
             print(f"[tts/openai] API error {resp.status_code}: {resp.text[:200]}")
             return None
 
         wav_data = b"".join(resp.iter_content(chunk_size=4096))
 
-        gain_db = config.OPENAI_TTS_GAIN_DB
+        gain_db = getattr(config, "OPENAI_TTS_GAIN_DB", 9)
         if gain_db > 0:
             try:
                 r = subprocess.run(
@@ -220,6 +292,7 @@ class TTSPlayer:
                     wav_data = r.stdout
             except (FileNotFoundError, subprocess.TimeoutExpired):
                 pass
+
         return wav_data
 
     # ── Player thread ─────────────────────────────────────────────────────────
@@ -284,6 +357,8 @@ class TTSPlayer:
             self.is_speaking.clear()
             self._mouth_timeline = []
 
+
+# ── Mouth animation helper ────────────────────────────────────────────────────
 
 def _analyze_mouth(wav_data: bytes) -> list[int]:
     """Parse WAV and compute mouth shape (0–3) per 80ms window."""

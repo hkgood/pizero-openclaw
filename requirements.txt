@@ -2,3 +2,16 @@ numpy
 Pillow
 requests
 python-dotenv
+
+# ── Bailian / DashScope SDK (FunASR + TTS) ───────────────────────────────────
+# Install: pip install dashscope
+# Both ASR and TTS use the same SDK, authenticated with DASHSCOPE_API_KEY.
+dashscope
+
+# ── Raspberry Pi hardware (PiSugar WhisPlay) ───────────────────────────────
+# Only needed on Raspberry Pi; install with:
+#   pip install -r requirements.txt -r requirements-pi.txt
+# or separately:
+#   pip install spidev RPi.GPIO
+spidev
+RPi.GPIO

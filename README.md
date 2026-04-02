@@ -28,44 +28,117 @@ The device maintains **conversation memory** across exchanges and includes a **s
 
 ## Setup
 
-### Prerequisites
-
-- Raspberry Pi OS (Bookworm or later)
-- Python 3.11+
-- A [MiniMax API key](https://platform.minimaxi.com/) for STT and TTS (free with MiniMax plan)
-- An [OpenClaw](https://openclaw.ai) gateway running somewhere accessible on your network
-
-### Install dependencies
+### 1. Clone the repo
 
 ```bash
-sudo apt install python3-numpy python3-pil
-pip install requests python-dotenv   # or: pip install -r requirements.txt
+git clone https://github.com/hkgood/pizero-openclaw.git
+cd pizero-openclaw
 ```
 
-The WhisPlay hardware driver should be installed at `/home/pi/Whisplay/Driver/` per the [PiSugar WhisPlay setup guide](https://github.com/PiSugar/whisplay-ai-chatbot).
+### 2. Install system packages
 
-### Configure
+```bash
+sudo apt update
+sudo apt install python3-numpy python3-pil
+```
 
-Copy the example env file and fill in your keys:
+### 3. Install Python packages
+
+**Standard (all users):**
+```bash
+pip install -r requirements.txt
+```
+
+**Raspberry Pi with WhisPlay hardware — also install Pi dependencies:**
+```bash
+# Requires spi and gpio group membership; add your user if needed:
+#   sudo usermod -aG spi,gpio $USER
+pip install -r requirements.txt -r requirements-pi.txt
+```
+
+### 4. Configure
 
 ```bash
 cp .env.example .env
 ```
 
-Edit `.env`:
+Edit `.env` and fill in your keys:
 
 ```bash
 export MINIMAX_API_KEY="your-minimax-api-key"
 export OPENCLAW_TOKEN="your-openclaw-gateway-token"
 ```
 
-### Run
+### 5. Run
 
+**Directly (any user):**
 ```bash
 python3 main.py
 ```
 
-Or deploy as a systemd service (see below).
+**Or use the wrapper script** (recommended — handles `.env` export lines correctly):
+```bash
+./run-openclaw.sh
+```
+
+**Or with a virtual environment:**
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt -r requirements-pi.txt
+./run-openclaw.sh
+```
+> ⚠️ **Do NOT run `.venv/bin/activate`** as a script (that causes "Permission denied"). Always `source .venv/bin/activate`.
+
+### 6. Deploy as a systemd service
+
+Edit `pizero-openclaw.service` and set `User=`, `Group=`, `WorkingDirectory=`, and `ExecStart=` to match your setup:
+
+```ini
+User=your-username
+Group=your-username
+WorkingDirectory=/path/to/pizero-openclaw
+ExecStart=/path/to/pizero-openclaw/.venv/bin/python /path/to/pizero-openclaw/main.py
+```
+
+Then deploy:
+
+```bash
+# Default: pi@pizero.local
+./sync.sh
+
+# Custom host:
+PI_HOST=rocky@pizero.local ./sync.sh
+```
+
+### Troubleshooting
+
+#### `ModuleNotFoundError: No module named 'WhisPlay'`
+WhisPlay driver not found. Set the path explicitly:
+```bash
+export WHISPLAY_DRIVER_PATH=~/Whisplay/Driver   # or your custom path
+python3 main.py
+```
+
+#### `No module named 'spidev'` or `No module named 'RPi'`
+Missing Pi hardware dependencies. Install them:
+```bash
+pip install -r requirements-pi.txt
+```
+
+#### `RuntimeError: Failed to add edge detection`
+RPi.GPIO failed to register a button interrupt. This is a known upstream issue with some Pi kernels. Workaround: the WhisPlay driver will fall back to polling. No action needed — the button will still work.
+
+#### `PermissionError: ... /tmp/openclaw.log`
+Log file was created by a different user (e.g., running as root then as pi). Either:
+- Delete the old log: `rm /tmp/openclaw.log`
+- Or set a custom log path: `export OPENCLAW_LOG_FILE=~/pizero-openclaw.log`
+
+#### `Permission denied` when activating venv
+You ran `.venv/bin/activate` as a script instead of sourcing it. Use:
+```bash
+source .venv/bin/activate   # correct
+```
 
 ## Configuration
 
@@ -82,6 +155,8 @@ All settings are configured via environment variables (loaded from `.env`):
 | `MINIMAX_TTS_SPEED` | `1.0` | TTS speed (0.5–2.0) |
 | `OPENCLAW_TOKEN` | _(required)_ | Auth token for the OpenClaw gateway |
 | `OPENCLAW_BASE_URL` | `http://localhost:18789` | OpenClaw gateway URL |
+| `WHISPLAY_DRIVER_PATH` | `~/Whisplay/Driver` | Path to WhisPlay driver |
+| `OPENCLAW_LOG_FILE` | `~/.local/state/pizero-openclaw.log` | Log file path |
 | `ENABLE_TTS` | `true` | Speak responses aloud |
 | `AUDIO_DEVICE` | `plughw:1,0` | ALSA input device |
 | `AUDIO_OUTPUT_DEVICE` | `default` | ALSA output device |
@@ -106,20 +181,14 @@ export OPENAI_TTS_VOICE="alloy"
 
 ## Deploy with systemd
 
-The included `sync.sh` script deploys to the Pi and sets up the service:
-
-```bash
-./sync.sh
-```
-
-This rsyncs the project to `pi@pizero.local`, installs the systemd unit, and restarts the service. Logs are available via:
+Logs are available via:
 
 ```bash
 # On the Pi:
 sudo journalctl -u pizero-openclaw -f
 
-# Or check the debug log:
-cat /tmp/openclaw.log
+# Or check the log file (default ~/.local/state/pizero-openclaw.log):
+cat ~/.local/state/pizero-openclaw.log
 ```
 
 ## Project structure
@@ -127,13 +196,15 @@ cat /tmp/openclaw.log
 ```
 main.py               — Entry point and orchestrator
 display.py            — LCD rendering (status, responses, idle clock, spinner)
-openclaw_client.py    — Streaming HTTP client for the OpenClaw gateway
+openclaw_client.py   — Streaming HTTP client for the OpenClaw gateway
 transcribe_openai.py  — Speech-to-text via MiniMax (or OpenAI fallback)
 tts_openai.py         — Text-to-speech via MiniMax (or OpenAI fallback) + ALSA playback
 record_audio.py       — Audio recording via ALSA arecord
 button_ptt.py         — Push-to-talk button state machine
 config.py             — Centralized configuration from .env
+run-openclaw.sh       — Wrapper script: sources .env then runs main.py
 sync.sh               — Deploy script (rsync + systemd restart)
+pizero-openclaw.service — systemd unit template
 ```
 
 ## License

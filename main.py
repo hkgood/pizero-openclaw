@@ -1,11 +1,22 @@
 import logging
+import os
 import re
 import signal
 import sys
 import threading
 import time
+from pathlib import Path
 
 import config
+
+# Log file: env var > ~/.local/state/pizero-openclaw.log > /tmp/openclaw.log
+_log_file = os.environ.get(
+    "OPENCLAW_LOG_FILE",
+    os.path.join(os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state")),
+                 "pizero-openclaw.log"),
+)
+# Ensure parent dir exists
+Path(_log_file).parent.mkdir(parents=True, exist_ok=True)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -13,7 +24,7 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler("/tmp/openclaw.log", mode="a"),
+        logging.FileHandler(_log_file, mode="a"),
     ],
 )
 log = logging.getLogger("openclaw")
