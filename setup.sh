@@ -13,6 +13,16 @@
 # ══════════════════════════════════════════════════════════════════
 set -e
 
+# ── TTY 检测：管道运行时自动切换非交互模式 ───────────────────────────────
+# 如果 stdin 不是终端（curl | bash 场景），自动进入非交互模式
+if [[ ! -t 0 ]]; then
+  echo "[setup] 检测到非交互环境，自动切换到非交互模式。"
+  echo "[setup] 如需交互式安装，请先下载脚本再运行："
+  echo "  curl -fsSL <URL> -o install.sh && chmod +x install.sh && ./install.sh"
+  echo ""
+  NON_INTERACTIVE=true
+fi
+
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OC_CFG="$HOME/.openclaw/openclaw.json"
 
