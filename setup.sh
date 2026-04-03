@@ -315,7 +315,7 @@ configure_api_keys() {
     else
       echo -e "${CYAN}OpenClaw Gateway 配置:${NC}"
       echo -n "OpenClaw Token (可在 http://localhost:18789 配置页获取): "
-      read -s token
+      read token
       echo ""
       if [[ -n "$token" ]]; then
         _write_env "OPENCLAW_TOKEN" "$token"
@@ -366,7 +366,7 @@ configure_bailian() {
     echo "(获取地址: https://bailian.console.aliyun.com/)"
     echo ""
     echo -n "百炼 API Key: "
-    read -s api_key
+    read api_key
     echo ""
     if [[ -n "$api_key" ]]; then
       _write_env "DASHSCOPE_API_KEY" "$api_key"
@@ -392,7 +392,7 @@ configure_openai() {
     echo -e "${CYAN}OpenAI 配置:${NC}"
     echo ""
     echo -n "OpenAI API Key: "
-    read -s api_key
+    read api_key
     echo ""
     if [[ -n "$api_key" ]]; then
       _write_env "OPENAI_API_KEY" "$api_key"
@@ -476,21 +476,22 @@ verify_install() {
 # ── 启动应用 ───────────────────────────────────────────────────
 launch_app() {
   step "启动应用..."
-  
+
   if [[ "$IS_RPI" == "true" && "$HAS_WHISPLAY" == "true" ]]; then
     info "启动硬件模式..."
-    cd "$REPO_DIR"
-    ./run-openclaw.sh
+    "$REPO_DIR/run-openclaw.sh" && return
   else
     # 测试模式
     if grep -q "TEST_MODE=true" "$REPO_DIR/.env" 2>/dev/null; then
       info "启动测试模式..."
-      cd "$REPO_DIR"
-      ./run-openclaw.sh
-    else
-      info "安装完成，稍后手动运行: ./run-openclaw.sh"
+      "$REPO_DIR/run-openclaw.sh" && return
     fi
   fi
+  # 走到这里说明启动失败（用户不在正确目录），提示手动运行
+  echo ""
+  echo "已在 ~/pizero-openclaw 安装完成。"
+  echo "请手动运行："
+  echo "  cd ~/pizero-openclaw && ./run-openclaw.sh"
 }
 
 # ── 主流程 ─────────────────────────────────────────────────────
@@ -543,9 +544,10 @@ main() {
   echo -e "${CYAN}╚════════════════════════════════════════════════════╝${NC}"
   echo ""
   echo "下一步："
-  echo "  1) 直接运行: ./run-openclaw.sh"
-  echo "  2) 查看帮助: cat README.md"
-  echo "  3) 配置 systemd 服务: sudo cp pizero-openclaw.service /etc/systemd/system/"
+  echo ""
+  echo "  cd ~/pizero-openclaw          # 进入项目目录（重要！）"
+  echo "  ./run-openclaw.sh              # 运行"
+  echo "  cat README.md                  # 查看帮助"
   echo ""
 
   if [[ "$AUTO_LAUNCH" == "true" ]]; then
