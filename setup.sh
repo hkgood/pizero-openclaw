@@ -254,7 +254,7 @@ install_python_deps() {
   # 硬件依赖（如果检测到 Pi）
   if [[ "$IS_RPI" == "true" ]]; then
     info "检测到 Raspberry Pi，安装硬件依赖..."
-    $PYTHON_CMD -m pip install -q RPi.GPIO spidev 2>/dev/null || true
+    $PYTHON_CMD -m pip install -q -r "$REPO_DIR/requirements-pi.txt" 2>/dev/null || true
     log "硬件依赖安装完成"
   fi
   

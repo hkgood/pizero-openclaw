@@ -3,3 +3,4 @@
 
 RPi.GPIO
 spidev
+dashscope  # Qwen / Bailian SDK for LLM + TTS
