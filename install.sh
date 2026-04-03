@@ -20,6 +20,23 @@ echo "║   🟢 pizero-openclaw 一键安装                     ║"
 echo "╚════════════════════════════════════════════════════╝"
 echo ""
 
+# ── TTY 检测：curl | bash 场景下提前退出 ─────────────────────────
+# 如果 stdin 不是终端，交互式选择会失败，提前告知用户正确用法
+if [[ ! -t 0 ]]; then
+  echo "错误：检测到 stdin 不是终端，交互式安装不可用。"
+  echo ""
+  echo "正确用法："
+  echo "  方式 A（推荐）：下载脚本后再运行"
+  echo "    curl -fsSL <URL> -o install.sh && chmod +x install.sh && ./install.sh"
+  echo ""
+  echo "  方式 B：直接 clone 后本地运行"
+  echo "    git clone https://github.com/$GITHUB_REPO.git"
+  echo "    cd pizero-openclaw && ./setup.sh"
+  echo ""
+  echo "当前命令 = curl | bash（不支持交互），请使用方式 A 或 B。"
+  exit 1
+fi
+
 # ── 检测是否已在克隆目录内 ─────────────────────────────────────────
 # 如果 main.py 存在，说明是从完整克隆目录运行的
 if [[ -f "${BASH_SOURCE[0]%/*}/main.py" ]] || [[ -f "./main.py" ]]; then
@@ -38,25 +55,49 @@ else
 
   # ── 克隆或更新仓库 ───────────────────────────────────────────────
   if [[ -d "$INSTALL_DIR/.git" ]]; then
-    echo "检测到已有安装目录: $INSTALL_DIR"
     cd "$INSTALL_DIR"
     # 检查目录是否完整
     if [[ ! -f "main.py" ]]; then
-      echo "目录不完整，重新克隆..."
-      cd /
-      rm -rf "$INSTALL_DIR"
-      echo "正在克隆代码仓库..."
-      git clone --depth=1 -b "$BRANCH" "https://github.com/$GITHUB_REPO.git" "$INSTALL_DIR"
-    else
-      echo "更新代码..."
-      if ! git pull origin "$BRANCH" 2>/dev/null; then
-        echo "网络问题，更新失败，尝试重新克隆..."
+      echo "检测到已有安装目录，但文件不完整。"
+      echo -n "是否删除并重新克隆？[y/N]: "
+      read -r confirm
+      if [[ "$confirm" =~ ^[Yy]$ ]]; then
         cd /
         rm -rf "$INSTALL_DIR"
         echo "正在克隆代码仓库..."
         git clone --depth=1 -b "$BRANCH" "https://github.com/$GITHUB_REPO.git" "$INSTALL_DIR"
+        cd "$INSTALL_DIR"
       else
-        echo "代码已是最新。"
+        echo "跳过重装，继续使用现有目录。"
+      fi
+    else
+      echo "检测到已有安装目录: $INSTALL_DIR"
+      echo "  1) 更新到最新代码"
+      echo "  2) 保留现有版本"
+      echo "  3) 删除并重新克隆"
+      echo -n "请选择 [1]: "
+      read -r choice
+      choice="${choice:-1}"
+      if [[ "$choice" == "2" ]]; then
+        echo "使用现有代码。"
+      elif [[ "$choice" == "3" ]]; then
+        cd /
+        rm -rf "$INSTALL_DIR"
+        echo "正在克隆代码仓库..."
+        git clone --depth=1 -b "$BRANCH" "https://github.com/$GITHUB_REPO.git" "$INSTALL_DIR"
+        cd "$INSTALL_DIR"
+      else
+        echo "更新代码..."
+        if ! git pull origin "$BRANCH" 2>/dev/null; then
+          echo "网络问题，更新失败，尝试重新克隆..."
+          cd /
+          rm -rf "$INSTALL_DIR"
+          echo "正在克隆代码仓库..."
+          git clone --depth=1 -b "$BRANCH" "https://github.com/$GITHUB_REPO.git" "$INSTALL_DIR"
+          cd "$INSTALL_DIR"
+        else
+          echo "代码已是最新。"
+        fi
       fi
     fi
   else
