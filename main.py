@@ -307,8 +307,10 @@ class Assistant:
 
         self.display = Display(backlight=config.LCD_BACKLIGHT)
         self.recorder = Recorder()
+        # 测试模式用 _SocketDisplay，没有 .board 属性，ButtonPTT 忽略 board
+        board = getattr(self.display, "board", None)
         self.ptt = ButtonPTT(
-            self.display.board,
+            board,
             on_press_cb=self._on_button_press,
             on_release_cb=self._on_button_release,
             on_cancel_cb=self._on_button_cancel,
