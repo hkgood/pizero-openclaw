@@ -167,15 +167,25 @@ detect_whisplay() {
 check_python() {
   step "检查 Python..."
   PYTHON_CMD=""
-  for py in python3 python3.11 python3.10 python3.9; do
-    if command -v $py >/dev/null 2>&1; then
-      # 用 Python 自身判断版本，避免 bc/awk 兼容性问题
-      OK=$($py -c 'import sys; major, minor = sys.version_info.major, sys.version_info.minor; exit(0 if (major > 3 or (major == 3 and minor >= 9)) else 1)' 2>/dev/null && echo "yes" || echo "no")
-      if [[ "$OK" == "yes" ]]; then
-        PYTHON_CMD=$py
-        log "Python: $($py --version 2>&1 | head -1)"
-        break
-      fi
+  for py in python3 python3.13 python3.12 python3.11 python3.10 python3.9 python; do
+    if ! command -v $py >/dev/null 2>&1; then
+      continue
+    fi
+    # 用 Python 自身判断版本，完全避免 bc/awk/dot 数字兼容问题
+    # 思路：让 Python 输出一行 "OK" 表示通过，否则输出 "FAIL"
+    RESULT=$($py -c "
+import sys
+major, minor = sys.version_info.major, sys.version_info.minor
+if major > 3 or (major == 3 and minor >= 9):
+    print('OK')
+else:
+    print('FAIL')
+" 2>/dev/null)
+    if [[ "$RESULT" == "OK" ]]; then
+      PYTHON_CMD=$py
+      PY_VER=$($py -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null)
+      log "Python: $PY_VER"
+      break
     fi
   done
   if [[ -z "$PYTHON_CMD" ]]; then
