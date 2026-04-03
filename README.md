@@ -34,7 +34,9 @@
 curl -fsSL https://raw.githubusercontent.com/hkgood/pizero-openclaw/main/install.sh | bash
 ```
 
-或者非交互式（CI / 自动化 / 已有 API Key）：
+`install.sh` 会自动克隆仓库并运行安装向导。没有 WhisPlay 硬件的机器会自动进入**测试模式**。
+
+非交互式安装（CI / 自动化）：
 ```bash
 DASHSCOPE_API_KEY=your-key OPENCLAW_TOKEN=your-token \
   ./install.sh --non-interactive
@@ -52,55 +54,69 @@ chmod +x setup.sh install.sh
 `setup.sh` 会自动：
 - 检测硬件环境（Raspberry Pi / macOS / Linux）
 - 安装系统依赖和 Python 依赖
-- 配置 API Key
-- 选择运行模式（硬件模式 / 测试模式）
+- 引导配置 API Key
+- 根据硬件情况选择运行模式
 
-### 手动安装
+## 测试模式（Mac / 无 WhisPlay 硬件）
 
-#### 1. 克隆代码
+在没有 WhisPlay 的机器上（macOS / Linux / 树莓派未装驱动），程序自动进入**测试模式**：
 
-### 手动安装
+- **GUI 模拟窗口**：Tkinter 渲染 240×240 等比放大 3 倍的模拟 LCD
+- **文本输入代替录音**：Console 输入文字按回车发送
+- **完整 LLM 流程**：语音识别 → 流式回复 → 显示，全流程可测试
 
-#### 1. 克隆代码
+```bash
+# 自动检测（推荐）
+./run-openclaw.sh
+
+# 手动强制测试模式
+export TEST_MODE=true
+./run-openclaw.sh
+```
+
+## 手动安装
+
+### 1. 克隆代码
 
 ```bash
 git clone https://github.com/hkgood/pizero-openclaw.git
 cd pizero-openclaw
 ```
 
-#### 2. 安装系统包
+### 2. 安装系统包
 
 ```bash
+# Raspberry Pi
 sudo apt update
-sudo apt install python3-numpy python3-pil python3-pip alsa-utils sox libsox-fmt-all curl
+sudo apt install python3-numpy python3-pil python3-pip alsa-utils sox libsox-fmt-all git curl
+
+# macOS（需要先安装 homebrew）
+brew install sox
 ```
 
-#### 3. 安装 Python 包
+### 3. 安装 Python 包
 
 ```bash
 # 基础依赖
-pip install -r requirements.txt
+pip3 install -r requirements.txt
 
 # Raspberry Pi 硬件依赖
-pip install -r requirements-pi.txt
-
-# 百炼 SDK（含 FunASR + Qwen TTS）
-pip install dashscope
+pip3 install -r requirements-pi.txt
 ```
 
-#### 4. 配置
+### 4. 配置
 
 ```bash
 cp .env.example .env
 ```
 
-编辑 `.env`，填写你的 Key：
+编辑 `.env` 填写 Key：
 
 ```bash
-# 阿里云百炼（默认）
+# 阿里云百炼（默认，推荐）
 export DASHSCOPE_API_KEY="your-bailian-api-key"
 
-# OpenClaw
+# OpenClaw（必填）
 export OPENCLAW_TOKEN="your-openclaw-gateway-token"
 ```
 
@@ -108,70 +124,26 @@ export OPENCLAW_TOKEN="your-openclaw-gateway-token"
 > - 百炼：https://bailian.console.aliyun.com/
 > - OpenClaw：http://localhost:18789 配置页
 
-#### 5. 运行
+### 5. 运行
 
 ```bash
-# 推荐方式（自动加载 .env）
-./run-openclaw.sh
-
-# 直接运行
-python3 main.py
-
-# 虚拟环境
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt -r requirements-pi.txt
 ./run-openclaw.sh
 ```
 
-> ⚠️ **不要运行 `.venv/bin/activate`**（会导致 "Permission denied"）。始终用 `source .venv/bin/activate`。
+### 6. 部署 systemd 服务（Pi）
 
-#### 6. 部署 systemd 服务
-
-编辑 `pizero-openclaw.service`，修改对应路径：
-
-```ini
-User=pi
-Group=pi
-WorkingDirectory=/home/pi/pizero-openclaw
-ExecStart=/home/pi/pizero-openclaw/.venv/bin/python /home/pi/pizero-openclaw/main.py
-```
-
-部署到 Pi：
+编辑 `pizero-openclaw.service` 里的路径和用户名，然后：
 
 ```bash
-# 默认: pi@pizero.local
 ./sync.sh
-
-# 自定义主机:
-PI_HOST=rocky@pizero.local ./sync.sh
+# 或指定主机：
+PI_HOST=pi@192.168.1.100 ./sync.sh
 ```
 
 查看日志：
-
 ```bash
-# systemd 日志
 sudo journalctl -u pizero-openclaw -f
-
-# 或日志文件
-cat ~/.local/state/pizero-openclaw.log
 ```
-
-## 测试模式（Mac / 无硬件环境）
-
-在没有 WhisPlay 硬件的机器上（Mac/Linux），可以使用**测试模式**：
-
-```bash
-# 在 setup.sh 中选择测试模式，或手动设置：
-export TEST_MODE=true
-export ENABLE_TTS=false
-./run-openclaw.sh
-```
-
-测试模式下：
-- 用**文本输入**代替麦克风录音
-- LCD 显示由 **Pillow 生成的帧序列**代替
-- 完整测试 LLM 对话流程
 
 ## 配置参数
 
@@ -179,12 +151,12 @@ export ENABLE_TTS=false
 
 | 变量 | 默认值 | 说明 |
 |---|---|---|
-| `STT_PROVIDER` | `funasr` | 语音识别：`funasr`（百炼）或 `openai` |
-| `TTS_PROVIDER` | `bailian` | 语音合成：`bailian`（百炼）或 `openai` |
+| `STT_PROVIDER` | `funasr` | 语音识别：`funasr` 或 `openai` |
+| `TTS_PROVIDER` | `bailian` | 语音合成：`bailian` 或 `openai` |
 | `DASHSCOPE_API_KEY` | （必填）| 阿里云百炼 API Key |
 | `BAILIAN_TTS_MODEL` | `qwen3-tts-flash` | 百炼 TTS 模型 |
 | `BAILIAN_TTS_VOICE` | `Cherry` | 百炼 TTS 音色 |
-| `BAILIAN_TTS_SPEED` | `1.0` | TTS 语速 (0.5–2.0) |
+| `BAILIAN_TTS_SPEED` | `1.0` | TTS 语速 |
 | `OPENAI_API_KEY` | — | OpenAI API Key（备选）|
 | `OPENAI_TRANSCRIBE_MODEL` | `whisper-1` | OpenAI Whisper 模型 |
 | `OPENAI_TTS_MODEL` | `tts-1` | OpenAI TTS 模型 |
@@ -193,78 +165,70 @@ export ENABLE_TTS=false
 | `OPENCLAW_BASE_URL` | `http://localhost:18789` | OpenClaw Gateway 地址 |
 | `WHISPLAY_DRIVER_PATH` | `~/Whisplay/Driver` | WhisPlay 驱动路径 |
 | `ENABLE_TTS` | `true` | 是否开启语音朗读 |
-| `AUDIO_DEVICE` | `plughw:1,0` | ALSA 输入设备 |
-| `AUDIO_OUTPUT_DEVICE` | `default` | ALSA 输出设备 |
+| `TEST_MODE` | `false` | 测试模式（无硬件时自动开启）|
+| `CONVERSATION_HISTORY_LENGTH` | `5` | 对话历史最大轮数 |
+| `MAX_CONTEXT_TOKENS` | `16000` | 对话历史最大 token 数（防超出 context）|
 | `LCD_BACKLIGHT` | `70` | 屏幕亮度 (0–100) |
-| `UI_MAX_FPS` | `4` | 屏幕最大刷新率 |
-| `CONVERSATION_HISTORY_LENGTH` | `5` | 对话历史轮数 |
-| `SILENCE_RMS_THRESHOLD` | `200` | 静音阈值（低于此值跳过）|
-| `TEST_MODE` | `false` | 测试模式（无硬件时设为 true）|
+| `AUDIO_DEVICE` | `plughw:1,0` | ALSA 输入设备 |
+| `SILENCE_RMS_THRESHOLD` | `200` | 静音阈值 |
 
 ## 百炼 vs OpenAI
 
 | | 阿里云百炼（默认）| OpenAI（备选）|
 |---|---|---|
-| STT | FunASR（免费额度）| Whisper API |
-| TTS | Qwen TTS（qwen3-tts-flash）| GPT-4o TTS |
-| 费用 | 有免费额度 | 按量计费 |
-| 推荐 | ✅ 推荐 | 备选方案 |
+| STT | FunASR（有免费额度）| Whisper API |
+| TTS | Qwen TTS | GPT-4o TTS |
+| 推荐 | ✅ 推荐 | 备选 |
 
 切换到 OpenAI：
-
 ```bash
 export STT_PROVIDER="openai"
 export TTS_PROVIDER="openai"
-export OPENAI_API_KEY="sk-your-openai-api-key"
+export OPENAI_API_KEY="sk-..."
 ```
 
 ## 故障排除
 
 ### `ModuleNotFoundError: No module named 'WhisPlay'`
-WhisPlay 驱动未找到。设置路径：
+WhisPlay 驱动未安装，程序自动切换到**测试模式**。如需硬件模式：
 ```bash
 export WHISPLAY_DRIVER_PATH=~/Whisplay/Driver
-python3 main.py
 ```
 
 ### `No module named 'spidev'` 或 `No module named 'RPi'`
-Pi 硬件依赖缺失。安装：
 ```bash
 pip install -r requirements-pi.txt
 ```
 
-### `RuntimeError: Failed to add edge detection`
-RPi.GPIO 注册按键中断失败。这是已知问题，WhisPlay 驱动会自动降级到轮询，不影响使用。
-
-### `PermissionError: ... /tmp/openclaw.log`
-日志文件由其他用户创建。删除旧日志或设置自定义路径：
+### `PermissionError: ... log file`
+日志文件被其他用户创建：
 ```bash
-rm /tmp/openclaw.log
-# 或
-export OPENCLAW_LOG_FILE=~/pizero-openclaw.log
+rm -f ~/.local/state/pizero-openclaw.log
 ```
 
-### `Permission denied` when activating venv
-用了脚本方式而非 source：
-```bash
-source .venv/bin/activate   # 正确
-```
+### WhisPlay 按钮无反应
+可能是 GPIO 中断注册失败，WhisPlay 驱动会自动降级到轮询，不影响使用。
 
 ## 项目结构
 
 ```
-main.py              — 入口和流程编排
-display.py           — LCD 渲染（状态、回复、时钟、动画）
+main.py               — 入口、流程编排、测试模式
+display.py            — LCD 渲染（状态、回复、时钟、精灵动画）
+display_mock.py       — 测试模式 WhisPlay 模拟接口
+gui_display.py        — 测试模式 GUI 窗口（Tkinter，独立进程）
 openclaw_client.py   — OpenClaw Gateway 流式 HTTP 客户端
-transcribe_openai.py — 语音识别（FunASR / Whisper）
-tts_openai.py        — 语音合成（Bailian Qwen TTS / OpenAI TTS）+ ALSA 播放
-record_audio.py       — ALSA 录音（arecord）
+transcribe_openai.py — 语音识别（FunASR / Whisper，自动重试）
+tts_openai.py        — 语音合成（Bailian Qwen TTS / OpenAI TTS）
+record_audio.py       — ALSA 录音，文件权限 600 保护隐私
 button_ptt.py         — 按键状态机（PTT）
-config.py             — 集中配置管理（从 .env 加载）
-setup.sh             — 自动化安装脚本
-run-openclaw.sh      — 启动脚本（加载 .env 后运行 main.py）
-sync.sh              — 部署脚本（rsync + systemd 重启）
+config.py             — 集中配置（从 .env 加载）
+setup.sh             — 自动化安装向导（交互 + 非交互）
+install.sh           — 一键安装入口（curl | bash）
+run-openclaw.sh      — 启动脚本（兼容 systemd EnvironmentFile）
+sync.sh              — 部署脚本（rsync + systemd）
 pizero-openclaw.service — systemd 服务模板
+requirements.txt      — 基础依赖
+requirements-pi.txt   — Raspberry Pi 硬件依赖
 ```
 
 ## License
