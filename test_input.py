@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
-test_input.py — 测试模式专用 pygame 虚拟 PTT（独立子进程）
-监听空格键状态变化，通过 Unix socket 通知父进程。
-
-用法: python3 test_input.py
+test_input.py — 测试模式 pygame 虚拟 PTT（tap-to-talk）
+单击空格：IDLE → LISTENING（开始）→ LISTENING → TRANSCRIBING（输入文字）
 """
 import json
 import socket
@@ -18,7 +16,6 @@ except Exception as e:
     sys.exit(1)
 
 SOCK_PATH = "/tmp/pizero-test-input.sock"
-
 W, H = 260, 300
 RADIUS = 80
 
@@ -51,10 +48,10 @@ def main():
                     elif phase == "listening":
                         phase = "typing"
                         _send({"type": "state", "phase": "typing"})
-            elif event.type == pygame.KEYUP:
-                if event.key == pygame.K_SPACE and phase == "listening":
-                    phase = "typing"
-                    _send({"type": "state", "phase": "typing"})
+                    elif phase == "typing":
+                        # 再次单击表示重新开始
+                        phase = "listening"
+                        _send({"type": "state", "phase": "listening"})
 
         screen.fill((15, 15, 20))
 
@@ -64,11 +61,11 @@ def main():
 
         # 底部状态文字
         if phase == "idle":
-            st_txt, st_color = "hold SPACE to talk", (80, 80, 90)
+            st_txt, st_color = "TAP SPACE to start", (80, 80, 90)
         elif phase == "listening":
-            st_txt, st_color = "RELEASE to send", (60, 140, 255)
+            st_txt, st_color = "TAP SPACE to send", (60, 140, 255)
         else:
-            st_txt, st_color = "type + ENTER in terminal", (0, 200, 100)
+            st_txt, st_color = "type + ENTER to send", (0, 200, 100)
         st = font.render(st_txt, True, st_color)
         screen.blit(st, (W // 2 - st.get_width() // 2, H - 48))
 
@@ -82,17 +79,23 @@ def main():
         pygame.draw.circle(screen, btn_color, (cx, cy), RADIUS)
         pygame.draw.circle(screen, (25, 25, 35), (cx, cy), RADIUS, 3)
 
-        label = {"idle": "MIC", "listening": "REC", "typing": "SEND"}[phase]
+        label = {"idle": "TAP", "listening": "TAP", "typing": "SEND"}[phase]
         mic = font_big.render(label, True, (255, 255, 255))
         mr = mic.get_rect(center=(cx, cy))
         screen.blit(mic, mr)
 
+        # 麦克风辅助图标
+        if phase == "listening":
+            sub = font_hint.render("now recording", True, (60, 140, 255))
+            sub_r = sub.get_rect(center=(cx, cy + 30))
+            screen.blit(sub, sub_r)
+
         # 提示
         hints = []
         if phase == "idle":
-            hints = ["HOLD SPACE to talk", "ESC to quit"]
+            hints = ["TAP SPACE", "to start recording"]
         elif phase == "listening":
-            hints = ["RELEASE SPACE", "to send"]
+            hints = ["TAP SPACE", "to stop & send"]
         else:
             hints = ["type in terminal", "ENTER to send"]
         y = cy + RADIUS + 12
