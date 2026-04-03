@@ -476,22 +476,28 @@ verify_install() {
 # ── 启动应用 ───────────────────────────────────────────────────
 launch_app() {
   step "启动应用..."
-
+  local script="$REPO_DIR/run-openclaw.sh"
+  if [[ ! -f "$script" ]]; then
+    echo "run-openclaw.sh 未找到，请手动运行："
+    echo "  cd ~/pizero-openclaw && ./run-openclaw.sh"
+    return
+  fi
+  chmod +x "$script" 2>/dev/null
   if [[ "$IS_RPI" == "true" && "$HAS_WHISPLAY" == "true" ]]; then
     info "启动硬件模式..."
-    "$REPO_DIR/run-openclaw.sh" && return
   else
-    # 测试模式
-    if grep -q "TEST_MODE=true" "$REPO_DIR/.env" 2>/dev/null; then
-      info "启动测试模式..."
-      "$REPO_DIR/run-openclaw.sh" && return
-    fi
+    info "启动测试模式..."
   fi
-  # 走到这里说明启动失败（用户不在正确目录），提示手动运行
   echo ""
-  echo "已在 ~/pizero-openclaw 安装完成。"
-  echo "请手动运行："
-  echo "  cd ~/pizero-openclaw && ./run-openclaw.sh"
+  echo "提示：按 Ctrl+Z 可后台运行，Ctrl+C 退出。"
+  echo ""
+  # exec 替换当前进程（成功=保持在app，失败=返回后打印手动运行提示）
+  # 注意：set -e 下 exec 失败会导致脚本退出，所以先检查文件存在
+  exec "$script" && exit 0 || {
+    echo ""
+    echo "启动失败。请手动运行："
+    echo "  cd ~/pizero-openclaw && ./run-openclaw.sh"
+  }
 }
 
 # ── 主流程 ─────────────────────────────────────────────────────
