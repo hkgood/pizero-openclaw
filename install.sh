@@ -32,7 +32,15 @@ if [[ -d "$INSTALL_DIR/.git" ]]; then
   echo "检测到已有安装目录: $INSTALL_DIR"
   echo "更新代码..."
   cd "$INSTALL_DIR"
-  git pull origin "$BRANCH" 2>/dev/null || echo "更新失败，继续使用现有代码"
+  if ! git pull origin "$BRANCH" 2>&1; then
+    echo "网络问题，更新失败，尝试重新克隆..."
+    cd /
+    rm -rf "$INSTALL_DIR"
+    echo "正在克隆代码仓库..."
+    git clone --depth=1 -b "$BRANCH" "https://github.com/$GITHUB_REPO.git" "$INSTALL_DIR"
+  else
+    echo "代码已是最新。"
+  fi
 else
   echo "正在克隆代码仓库..."
   git clone --depth=1 -b "$BRANCH" "https://github.com/$GITHUB_REPO.git" "$INSTALL_DIR"
