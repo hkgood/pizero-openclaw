@@ -56,6 +56,10 @@ while [[ $# -gt 0 ]]; do
       echo "  --provider <bailian|openai>  指定 AI 提供商"
       exit 0
       ;;
+    --tty)
+      # 兼容 install.sh 传入的 --tty 参数，忽略即可
+      shift
+      ;;
     *)
       echo "未知参数: $1"
       echo "用法: $0 --help"
