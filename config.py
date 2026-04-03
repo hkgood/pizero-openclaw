@@ -52,6 +52,7 @@ UI_MAX_FPS = int(os.environ.get("UI_MAX_FPS", "4"))
 # ─── Behaviour ─────────────────────────────────────────────────────────────
 ENABLE_TTS = os.environ.get("ENABLE_TTS", "true").lower() in ("true", "1", "yes")
 CONVERSATION_HISTORY_LENGTH = int(os.environ.get("CONVERSATION_HISTORY_LENGTH", "5"))
+MAX_CONTEXT_TOKENS = int(os.environ.get("MAX_CONTEXT_TOKENS", "16000"))
 SILENCE_RMS_THRESHOLD = float(os.environ.get("SILENCE_RMS_THRESHOLD", "200"))
 
 # Dry run when no API keys are configured
@@ -85,4 +86,5 @@ def print_config():
     print(f"OPENCLAW_TOKEN set    = {bool(OPENCLAW_TOKEN)}")
     print(f"ENABLE_TTS            = {ENABLE_TTS}")
     print(f"CONVERSATION_HISTORY  = {CONVERSATION_HISTORY_LENGTH}")
+    print(f"MAX_CONTEXT_TOKENS    = {MAX_CONTEXT_TOKENS}")
     print(f"SILENCE_RMS_THRESHOLD = {SILENCE_RMS_THRESHOLD}")

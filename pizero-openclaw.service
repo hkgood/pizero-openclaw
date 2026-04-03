@@ -17,15 +17,20 @@ ExecStart=/usr/bin/python3 /home/pi/pizero-openclaw/main.py
 
 # Load env vars from .env (python-dotenv loads them in config.py;
 # systemd expects KEY=value without 'export', which .env.example has)
-# If your .env uses 'export', use the wrapper script instead (see README).
 EnvironmentFile=/home/pi/pizero-openclaw/.env
 
-Restart=on-failure
+# 自动重启：崩溃后重启 / 系统唤醒后重启
+Restart=always
 RestartSec=5
 
-# Log to journal (captured by journalctl) + optional file
+# 防止重启循环：如果 10 秒内重启超过 3 次，则停止重启（硬件故障时避免刷日志）
+StartLimitBurst=3
+StartLimitIntervalSec=10
+
+# 日志
 StandardOutput=journal
 StandardError=journal
 
+# 开机自启
 [Install]
 WantedBy=multi-user.target

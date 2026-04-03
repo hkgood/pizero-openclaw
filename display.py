@@ -457,7 +457,7 @@ class Display:
         try:
             self._battery_font = ImageFont.truetype(_FONT_PATH_REGULAR, BATTERY_FONT_SIZE)
         except OSError:
-            self._battery_font = self._status_sub_font  # fallback so battery corner still draws
+            self._battery_font = self._status_sub_font
         self._clock_font = ImageFont.truetype(_FONT_PATH, CLOCK_FONT_SIZE)
         self._emoji_status = _load_emoji_font(STATUS_FONT_SIZE)
         self._emoji_response = _load_emoji_font(RESPONSE_FONT_SIZE)
@@ -477,6 +477,15 @@ class Display:
         self._cached_wrapped: list[list[str]] = []
         self._sprite_frames = _generate_sprite_frames()
 
+        # ── 电池和 WiFi 缓存（异步更新，不阻塞 UI）──────────────────────
+        self._battery_pct: int | None = None
+        self._battery_status: str | None = None
+        self._wifi_online = False
+        self._battery_cache_stale = True  # 启动时强制刷新一次
+        self._battery_thread = threading.Thread(target=self._battery_loop, daemon=True)
+        self._battery_thread.start()
+        self._wifi_cached = False
+
         self.clear()
 
     def sleep(self):
@@ -495,6 +504,23 @@ class Display:
     @property
     def is_sleeping(self) -> bool:
         return self._sleeping
+
+    # ── 电池/WiFi 后台缓存（不阻塞 UI）──────────────────────────────────
+    def _battery_loop(self):
+        """每 30 秒异步更新一次电池和 WiFi 状态，避免 socket 阻塞渲染线程。"""
+        import time
+        while True:
+            try:
+                # WiFi 状态（轻量，开销极小）
+                self._wifi_online = _wifi_connected()
+                # 电池（可能阻塞，最多 2 秒）
+                pct, status = _read_battery()
+                self._battery_pct = pct
+                self._battery_status = status
+                self._battery_cache_stale = False
+            except Exception:
+                pass
+            time.sleep(30)
 
     def _draw_mixed(
         self,
@@ -636,8 +662,20 @@ class Display:
         return buf
 
     def _draw_battery(self, draw: ImageDraw.ImageDraw):
-        """Draw battery percentage and status in top-right corner (small). Always draws something."""
-        pct, status = _read_battery()
+        """Draw battery + WiFi status in top corners. Uses cached values (updated every 30s)."""
+        # 启动时如果缓存还没好，先读一次同步的（不阻塞主线程）
+        if self._battery_cache_stale:
+            try:
+                pct, status = _read_battery()
+                self._battery_pct = pct
+                self._battery_status = status
+                self._battery_cache_stale = False
+            except Exception:
+                pass
+
+        # 电池
+        pct = self._battery_pct
+        status = self._battery_status
         if pct is not None:
             if status == "Charging":
                 label = f"↑{pct}%"
@@ -646,11 +684,16 @@ class Display:
             else:
                 label = f"{pct}%"
         else:
-            label = "—"  # No battery detected; show placeholder so corner is visible
+            label = "—"
         tw = self._battery_font.getlength(label)
-        x = self._width - tw - self._pad_x
-        y = self._pad_y
-        draw.text((x, y), label, font=self._battery_font, fill=(120, 120, 120))
+        bx = self._width - tw - self._pad_x
+        by = self._pad_y
+        draw.text((bx, by), label, font=self._battery_font, fill=(120, 120, 120))
+
+        # WiFi 指示灯（顶部左侧，用缓存值）
+        wifi_label = "\u25cf" if self._wifi_online else "\u25cb"
+        wifi_color = (0, 180, 80) if self._wifi_online else (180, 60, 60)
+        draw.text((self._pad_x, self._pad_y), wifi_label, font=self._battery_font, fill=wifi_color)
 
     def _draw(self, image: Image.Image):
         buf = self._image_to_rgb565(image)
@@ -713,13 +756,8 @@ class Display:
 
         draw.rectangle((0, 0, self._width, ACCENT_BAR_HEIGHT), fill=(40, 40, 40))
 
+        # _draw_battery 内部已包含电池 + WiFi 状态，使用缓存值
         self._draw_battery(draw)
-
-        # Wifi indicator (top-left)
-        if _wifi_connected():
-            draw.text((self._pad_x, self._pad_y), "\u25cf", font=self._battery_font, fill=(0, 180, 80))
-        else:
-            draw.text((self._pad_x, self._pad_y), "\u25cb", font=self._battery_font, fill=(180, 60, 60))
 
         now = datetime.now()
 

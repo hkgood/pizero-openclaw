@@ -8,7 +8,10 @@ import wave
 
 import config
 
-WAV_PATH = "/tmp/utterance.wav"
+# 录音文件放在用户专属目录，权限 600（仅本人可读写）
+_WAV_DIR = Path.home() / ".local" / "state" / "pizero-openclaw"
+_WAV_DIR.mkdir(parents=True, exist_ok=True)
+_WAV_PATH = str(_WAV_DIR / "utterance.wav")
 
 
 def check_audio_level(wav_path: str) -> float:
@@ -62,8 +65,10 @@ class Recorder:
         if self.is_recording:
             return
 
-        if os.path.exists(WAV_PATH):
-            os.remove(WAV_PATH)
+        # 设置录音文件权限：仅本人可读写（600）
+        os.chmod(_WAV_DIR, 0o700)
+        if os.path.exists(_WAV_PATH):
+            os.chmod(_WAV_PATH, 0o600)
 
         cmd = [
             "arecord",
@@ -72,7 +77,7 @@ class Recorder:
             "-r", str(config.AUDIO_SAMPLE_RATE),
             "-c", "1",
             "-t", "wav",
-            WAV_PATH,
+            _WAV_PATH,
         ]
         try:
             self._proc = subprocess.Popen(
@@ -93,7 +98,7 @@ class Recorder:
         """Stop recording. Returns path to the WAV file."""
         proc = self._proc
         if proc is None:
-            return WAV_PATH
+            return _WAV_PATH
 
         # Send SIGINT for clean WAV header finalization
         try:
@@ -116,13 +121,16 @@ class Recorder:
 
         self._proc = None
 
-        if not os.path.exists(WAV_PATH) or os.path.getsize(WAV_PATH) < 100:
+        if not os.path.exists(_WAV_PATH) or os.path.getsize(_WAV_PATH) < 100:
             print(f"[rec] WARNING: WAV file missing or too small")
             if stderr:
                 print(f"[rec] stderr: {stderr}")
             _dump_audio_info()
 
-        return WAV_PATH
+        # 录音结束立即设权限，防止中间被其他进程读取
+        os.chmod(_WAV_PATH, 0o600)
+
+        return _WAV_PATH
 
     def cancel(self) -> None:
         """Kill recording without caring about output."""

@@ -86,69 +86,79 @@ class _FunASRCallback:
         return self._error
 
 
-def _transcribe_funasr(wav_path: str) -> str:
-    """Transcribe via Bailian FunASR cloud (WebSocket SDK)."""
-    try:
-        import dashscope
-        from dashscope.audio.asr import Recognition, RecognitionCallback
-    except ImportError:
-        raise RuntimeError(
-            "dashscope SDK not installed. Run: pip install dashscope"
-        )
+_FUNASR_TIMEOUT = 30  # 单次请求超时（秒）
+_FUNASR_MAX_RETRIES = 3  # 最大重试次数
 
-    # Configure dashscope
+
+def _transcribe_funasr(wav_path: str) -> str:
+    """Transcribe via Bailian FunASR cloud (WebSocket SDK). 自动重试，网络抖动也能成功。"""
+    import dashscope
+    from dashscope.audio.asr import Recognition, RecognitionCallback
+
     api_key = getattr(config, "DASHSCOPE_API_KEY", "")
     if not api_key:
         raise RuntimeError("DASHSCOPE_API_KEY not set")
     dashscope.api_key = api_key
 
     base_url = getattr(config, "DASHSCOPE_API_BASE", "https://dashscope.aliyuncs.com")
-    # Convert HTTPS REST URL to WebSocket URL
     ws_base = base_url.replace("https://", "wss://").replace("http://", "ws://")
     dashscope.base_websocket_api_url = ws_base + "/api-ws/v1/inference"
-
-    callback = _FunASRCallback()
-
-    recognition = Recognition(
-        model="fun-asr-realtime",
-        format="wav",
-        sample_rate=16000,
-        callback=callback,
-        semantic_punctuation_enabled=False,
-    )
-
-    recognition.start()
 
     with open(wav_path, "rb") as f:
         file_buffer = f.read()
 
-    buffer_size = len(file_buffer)
-    offset = 0
-    chunk_size = 3200  # 100ms of 16kHz/16bit mono audio
+    last_error = None
+    for attempt in range(1, _FUNASR_MAX_RETRIES + 1):
+        callback = _FunASRCallback()
+        try:
+            recognition = Recognition(
+                model="fun-asr-realtime",
+                format="wav",
+                sample_rate=16000,
+                callback=callback,
+                semantic_punctuation_enabled=False,
+            )
+            recognition.start()
 
-    while offset < buffer_size:
-        remaining = buffer_size - offset
-        current_chunk = min(chunk_size, remaining)
-        chunk_data = file_buffer[offset:offset + current_chunk]
-        recognition.send_audio_frame(chunk_data)
-        offset += current_chunk
-        # Small delay to avoid overwhelming the WebSocket
-        time.sleep(0.01)
+            buffer_size = len(file_buffer)
+            offset = 0
+            chunk_size = 3200
 
-    recognition.stop()
+            while offset < buffer_size:
+                remaining = buffer_size - offset
+                current_chunk = min(chunk_size, remaining)
+                chunk_data = file_buffer[offset:offset + current_chunk]
+                recognition.send_audio_frame(chunk_data)
+                offset += current_chunk
+                time.sleep(0.01)
 
-    # Wait for callback to finish (with timeout)
-    timeout = 30
-    t0 = time.time()
-    while not callback._done and (time.time() - t0) < timeout:
-        time.sleep(0.1)
+            recognition.stop()
 
-    if callback.error:
-        raise callback.error
+            # 等待结果，带超时
+            t0 = time.time()
+            while not callback._done and (time.time() - t0) < _FUNASR_TIMEOUT:
+                time.sleep(0.1)
 
-    transcript = " ".join(callback.texts).strip()
-    print(f"[transcribe/funasr] result: {transcript[:120]}")
-    return transcript
+            if callback.error:
+                raise callback.error
+
+            transcript = " ".join(callback.texts).strip()
+            print(f"[transcribe/funasr] result: {transcript[:120]} (attempt {attempt})")
+            return transcript
+
+        except Exception as e:
+            last_error = e
+            print(f"[transcribe/funasr] attempt {attempt}/{_FUNASR_MAX_RETRIES} failed: {e}")
+            if attempt < _FUNASR_MAX_RETRIES:
+                wait = 2 ** (attempt - 1)  # 指数退避：1s, 2s
+                print(f"[transcribe/funasr] retrying in {wait}s...")
+                time.sleep(wait)
+            else:
+                print(f"[transcribe/funasr] all {_FUNASR_MAX_RETRIES} attempts failed")
+
+    raise RuntimeError(
+        f"FunASR transcription failed after {_FUNASR_MAX_RETRIES} attempts: {last_error}"
+    )
 
 
 # ── OpenAI Whisper (fallback) ─────────────────────────────────────────────────

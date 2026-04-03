@@ -1,0 +1,5 @@
+# Raspberry Pi hardware dependencies
+# 安装方式: pip install -r requirements.txt -r requirements-pi.txt
+
+RPi.GPIO
+spidev

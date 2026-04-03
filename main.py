@@ -1,4 +1,5 @@
 import logging
+import logging.handlers
 import os
 import re
 import signal
@@ -9,14 +10,22 @@ from pathlib import Path
 
 import config
 
-# Log file: env var > ~/.local/state/pizero-openclaw.log > /tmp/openclaw.log
+# ── 日志配置（自动 rotation，防止 SD 卡撑爆）───────────────────────────────
 _log_file = os.environ.get(
     "OPENCLAW_LOG_FILE",
     os.path.join(os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state")),
                  "pizero-openclaw.log"),
 )
-# Ensure parent dir exists
 Path(_log_file).parent.mkdir(parents=True, exist_ok=True)
+
+# RotatingFileHandler: 每个文件最大 1MB，保留最近 5 个文件
+file_handler = logging.handlers.RotatingFileHandler(
+    _log_file,
+    mode="a",
+    maxBytes=1_000_000,  # 1 MB
+    backupCount=5,
+    encoding="utf-8",
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -24,21 +33,277 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler(_log_file, mode="a"),
+        file_handler,
     ],
 )
 log = logging.getLogger("openclaw")
-from display import Display
-from record_audio import Recorder, check_audio_level
-from transcribe_openai import transcribe
-from openclaw_client import stream_response
-from button_ptt import ButtonPTT, State
-from tts_openai import TTSPlayer
+
+# ── 硬件检测：测试模式 vs 真实硬件 ────────────────────────────────────────
+_TEST_MODE = os.environ.get("TEST_MODE", "false").lower() in ("true", "1", "yes")
+_HAS_WHISPLAY = False
+
+if _TEST_MODE:
+    log.info("TEST_MODE: 使用 mock display + 文本输入")
+else:
+    try:
+        from display import Display
+        _HAS_WHISPLAY = True
+    except ImportError as e:
+        err_str = str(e).lower()
+        if "WhisPlay" in str(e) or "whisplay" in err_str or "no module named" in err_str:
+            log.warning("WhisPlay 未安装，切换到测试模式 (设置 TEST_MODE=true 跳过此检测)")
+            _TEST_MODE = True
+        else:
+            raise
+
+if _TEST_MODE:
+    # ── 测试模式依赖 ────────────────────────────────────────────────────
+    import json
+    from pathlib import Path
+    from display_mock import MockWhisPlayBoard
+    from record_audio import Recorder, check_audio_level
+    from transcribe_openai import transcribe
+    from openclaw_client import stream_response
+
+    class _TextPTT:
+        """测试模式：用文本输入代替麦克风录音。"""
+        from enum import Enum
+        class State(Enum):
+            IDLE = "idle"
+            LISTENING = "listening"
+            TRANSCRIBING = "transcribing"
+            THINKING = "thinking"
+            STREAMING = "streaming"
+            ERROR = "error"
+
+        def __init__(self, board=None, on_press_cb=None, on_release_cb=None,
+                     on_cancel_cb=None, cancel_allowed_cb=None,
+                     on_any_press_cb=None, on_abort_listening_cb=None):
+            self.state = self.State.IDLE
+            self._on_release = on_release_cb
+            self._thread = None
+            self._stop = threading.Event()
+            self._input_text = ""
+            self._input_ready = threading.Event()
+
+        def _input_loop(self):
+            log.info("测试模式: 输入文字后按回车发送 (Ctrl+C 退出)")
+            while not self._stop.is_set():
+                try:
+                    line = input("\n> ").strip()
+                    if line:
+                        self._input_text = line
+                        self._input_ready.set()
+                        log.info(f"输入: {line[:50]}...")
+                except (EOFError, KeyboardInterrupt):
+                    break
+
+        def start_listening(self):
+            if self._thread and self._thread.is_alive():
+                return
+            self._input_ready.clear()
+            self._stop.clear()
+            self._thread = threading.Thread(target=self._input_loop, daemon=True)
+            self._thread.start()
+
+        def wait_for_input(self, timeout=None):
+            return self._input_ready.wait(timeout=timeout)
+
+        def consume_input(self):
+            text = self._input_text
+            self._input_text = ""
+            self._input_ready.clear()
+            return text
+
+        def stop_listening(self):
+            self._stop.set()
+            if self._thread:
+                try:
+                    self._thread.join(timeout=1)
+                except RuntimeError:
+                    pass
+
+        def cleanup(self):
+            self.stop_listening()
+
+    ButtonPTT = _TextPTT
+
+    class _DisabledTTS:
+        def __init__(self):
+            pass
+        def submit(self, text):
+            pass
+        def flush(self):
+            pass
+        def cancel(self):
+            pass
+
+    TTSPlayer = _DisabledTTS
+    config.ENABLE_TTS = False
+
+    class _SocketDisplay:
+        """
+        测试模式 Display：通过 Unix socket 与 gui_display.py 子进程通信，
+        在真实 GUI 窗口中渲染 240x240 模拟 LCD（放大 3x）。
+        同时保留 console 输出用于调试。
+        """
+        _SOCK_PATH = "/tmp/pizero-gui.sock"
+
+        def __init__(self, backlight=70):
+            self._backlight = backlight
+            self._width = 240
+            self._height = 240
+            self._sleeping = False
+            self._response_buf = ""
+            self._char_state = "idle"
+            self._stop_event = threading.Event()
+            self._conn = None
+            self._lock = threading.Lock()
+            self._board = MockWhisPlayBoard()
+            self._frame_count = 0
+            self._output_dir = self._board._output_dir
+            self._start_gui()
+            log.info(f"SocketDisplay: GUI 窗口已启动，输出目录 {self._output_dir}")
+
+        def _start_gui(self):
+            import subprocess, socket, os, time
+
+            # Kill any stale gui process
+            try:
+                os.unlink(self._SOCK_PATH)
+            except OSError:
+                pass
+
+            repo_dir = Path(__file__).parent.resolve()
+            self._proc = subprocess.Popen(
+                [sys.executable, str(repo_dir / "gui_display.py"), self._SOCK_PATH],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            # Wait for socket to be ready
+            for _ in range(30):
+                time.sleep(0.1)
+                try:
+                    conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                    conn.connect(self._SOCK_PATH)
+                    conn.close()
+                    break
+                except (OSError, IOError):
+                    pass
+
+        def _send(self, msg: dict):
+            with self._lock:
+                try:
+                    conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                    conn.settimeout(2.0)
+                    conn.connect(self._SOCK_PATH)
+                    conn.sendall((json.dumps(msg) + "\n").encode())
+                    conn.close()
+                except Exception as e:
+                    log.debug(f"gui send failed: {e}")
+
+        @property
+        def is_sleeping(self):
+            return self._sleeping
+
+        def sleep(self):
+            self._sleeping = True
+
+        def wake(self):
+            self._sleeping = False
+
+        def set_idle_screen(self):
+            now = datetime.now()
+            print(f"\n┌─────────────────────────────┐")
+            print(f"│  🕐 {now.strftime('%H:%M:%S')}               │")
+            print(f"│  📅 {now.strftime('%a, %b %d')}              │")
+            print(f"│  🟢 TEST MODE — 按回车说话  │")
+            print(f"└─────────────────────────────┘")
+            self._send({"type": "idle"})
+
+        def set_status(self, text, color=(200,200,200), subtitle=None, accent_color=None):
+            print(f"\n┌─────────────────────────────┐")
+            print(f"│ {text[:25]:<25} │")
+            if subtitle:
+                print(f"│ {subtitle[:25]:<25} │")
+            print(f"└─────────────────────────────┘")
+            accent = "#{:02X}{:02X}{:02X}".format(*accent_color) if accent_color else "#282828"
+            self._send({"type": "status", "text": text, "sub": subtitle or "", "accent": accent})
+
+        def start_spinner(self, label="Thinking", color=(255,220,50)):
+            print(f"\n⏳ {label}...", end="", flush=True)
+            self._send({"type": "status", "text": f"⏳ {label}", "sub": "Getting answer…",
+                        "accent": "#{:02X}{:02X}{:02X}".format(*color)})
+
+        def stop_spinner(self):
+            print()
+
+        def set_response_text(self, text):
+            self._response_buf = text
+            self._send({"type": "response", "text": text})
+
+        def append_response(self, delta):
+            self._response_buf += delta
+            self._send({"type": "append", "delta": delta})
+            print(f"\r  💬 {self._response_buf[-60:]}", end="", flush=True)
+
+        def flush_response(self):
+            print(f"\n✅ 回复: {self._response_buf[:200]}")
+
+        def start_character(self, state="done", tts_player=None):
+            self._char_state = state
+            print(f"\n🎭 {state.upper()}")
+            self._send({"type": "character", "state": state})
+
+        def set_character_state(self, state):
+            self._char_state = state
+            self._send({"type": "character", "state": state})
+
+        def stop_character(self):
+            pass
+
+        def clear(self):
+            print("\n" + "─" * 31)
+            self._send({"type": "clear"})
+
+        def set_backlight(self, level):
+            self._backlight = level
+
+        def cleanup(self):
+            self._stop_event.set()
+            try:
+                self._send({"type": "quit"})
+            except Exception:
+                pass
+            if hasattr(self, "_proc") and self._proc:
+                self._proc.terminate()
+            print(f"SocketDisplay done. Total renders: {self._frame_count}")
+
+    Display = _SocketDisplay
+
+    def check_audio_level(path):
+        """测试模式跳过静音检测。"""
+        return 5000
+
+else:
+    # ── 真实硬件模式 ────────────────────────────────────────────────────
+    from display import Display
+    from record_audio import Recorder, check_audio_level
+    from transcribe_openai import transcribe
+    from openclaw_client import stream_response
+    from button_ptt import ButtonPTT, State
+    from tts_openai import TTSPlayer
+
+from datetime import datetime
 
 
 class Assistant:
     def __init__(self):
         config.print_config()
+
+        # ── 启动时检查 OpenClaw Gateway 连通性 ────────────────────────────
+        if not _TEST_MODE:
+            self._check_openclaw_connectivity()
 
         self.display = Display(backlight=config.LCD_BACKLIGHT)
         self.recorder = Recorder()
@@ -63,8 +328,54 @@ class Assistant:
         self._tts = TTSPlayer() if config.ENABLE_TTS else None
         self._conversation_history: list[dict] = []
 
+    def _check_openclaw_connectivity(self):
+        """启动时检查 OpenClaw Gateway 是否可达，不可达则提示用户。"""
+        import urllib.request
+        url = config.OPENCLAW_BASE_URL.rstrip("/") + "/v1/models"
+        try:
+            req = urllib.request.Request(url)
+            if config.OPENCLAW_TOKEN:
+                req.add_header("Authorization", f"Bearer {config.OPENCLAW_TOKEN}")
+            urllib.request.urlopen(req, timeout=5)
+            log.info("OpenClaw gateway reachable: %s", config.OPENCLAW_BASE_URL)
+        except Exception as e:
+            log.warning(
+                "OpenClaw gateway not reachable at %s: %s\n"
+                "  - Is the OpenClaw gateway running? (openclaw gateway start)"
+                "  - Is OPENCLAW_TOKEN configured in .env?\n"
+                "  - Is the URL correct? (current: %s)",
+                config.OPENCLAW_BASE_URL, e, config.OPENCLAW_BASE_URL,
+            )
+
     def _is_stale(self, my_gen: int) -> bool:
         return self._worker_gen != my_gen
+
+    def _prune_history(self):
+        """按 token 数裁剪对话历史，防止超出模型 context window。
+        
+        简单估算：中文≈1 token/字，英文≈1 token/4 字符。
+        留 20% buffer，实际用 (max_tokens * 0.8) 作为上限。
+        """
+        max_tokens = (
+            getattr(config, "MAX_CONTEXT_TOKENS", 16000) * 80 // 100
+        )
+        # 估算当前总 token 数
+        def _estimate_tokens(history: list[dict]) -> int:
+            total = 0
+            for msg in history:
+                content = msg.get("content", "")
+                # 粗略估算：汉字每个 1 token，英文每 4 字符 1 token
+                chinese_chars = sum(1 for c in content if '\u4e00' <= c <= '\u9fff')
+                other_chars = len(content) - chinese_chars
+                total += chinese_chars + (other_chars + 3) // 4
+            return total
+
+        while len(self._conversation_history) > 2:
+            estimated = _estimate_tokens(self._conversation_history)
+            if estimated <= max_tokens:
+                break
+            # 每次移除最老的一对（user + assistant）
+            self._conversation_history = self._conversation_history[2:]
 
     def _touch(self):
         self._last_activity = time.monotonic()
@@ -104,11 +415,15 @@ class Assistant:
                 subtitle="Speak now",
                 accent_color=(60, 140, 255),
             )
-        try:
-            self.recorder.start()
-        except Exception as e:
-            log.error("recording start failed: %s", e)
-            self._show_error(str(e))
+        if not _TEST_MODE:
+            try:
+                self.recorder.start()
+            except Exception as e:
+                log.error("recording start failed: %s", e)
+                self._show_error(str(e))
+        else:
+            # 测试模式：启动文本输入循环
+            self.ptt.start_listening()
 
     def _on_button_release(self):
         log.info("button released -- processing")
@@ -134,51 +449,62 @@ class Assistant:
                 self._go_idle()
 
     def _process_utterance_inner(self, my_gen: int):
-        # --- Stop recording ---
-        wav_path = self.recorder.stop()
+        # --- 测试模式：直接从文本输入获取 ---
+        if _TEST_MODE:
+            self.ptt.state = State.TRANSCRIBING
+            self.display.set_status("Processing...", color=(255,230,100), subtitle="Thinking")
+            transcript = self.ptt.consume_input()
+            if not transcript:
+                log.info("empty input, returning to idle")
+                self._go_idle()
+                return
+            log.info("test input: %r", transcript[:80])
+        else:
+            # --- 真实硬件模式：录音 → 转写 ---
+            wav_path = self.recorder.stop()
 
-        # --- Silence gate ---
-        rms = check_audio_level(wav_path)
-        if rms < config.SILENCE_RMS_THRESHOLD:
-            log.info("silence detected (RMS=%.0f), skipping", rms)
+            # --- Silence gate ---
+            rms = check_audio_level(wav_path)
+            if rms < config.SILENCE_RMS_THRESHOLD:
+                log.info("silence detected (RMS=%.0f), skipping", rms)
+                if self._is_stale(my_gen):
+                    return
+                self.display.stop_character()
+                self.display.set_status(
+                    "No speech detected",
+                    color=(160, 160, 160),
+                    subtitle="Try again",
+                    accent_color=(80, 80, 80),
+                )
+                time.sleep(1.5)
+                if not self._is_stale(my_gen):
+                    self._go_idle()
+                return
+
             if self._is_stale(my_gen):
                 return
-            self.display.stop_character()
-            self.display.set_status(
-                "No speech detected",
-                color=(160, 160, 160),
-                subtitle="Try again",
-                accent_color=(80, 80, 80),
-            )
-            time.sleep(1.5)
-            if not self._is_stale(my_gen):
-                self._go_idle()
-            return
 
-        if self._is_stale(my_gen):
-            return
+            # --- Transcribe ---
+            self._state_entered_at = time.monotonic()
+            self.ptt.state = State.TRANSCRIBING
+            if self._tts:
+                self.display.set_character_state("thinking")
+            else:
+                self.display.set_status(
+                    "Transcribing...",
+                    color=(255, 230, 100),
+                    subtitle="One moment",
+                    accent_color=(255, 180, 0),
+                )
+            t0 = time.monotonic()
+            transcript = transcribe(wav_path)
+            log.info("transcribe took %.1fs => %r", time.monotonic() - t0, (transcript[:80] if transcript else "(empty)"))
 
-        # --- Transcribe ---
-        self._state_entered_at = time.monotonic()
-        self.ptt.state = State.TRANSCRIBING
-        if self._tts:
-            self.display.set_character_state("thinking")
-        else:
-            self.display.set_status(
-                "Transcribing...",
-                color=(255, 230, 100),
-                subtitle="One moment",
-                accent_color=(255, 180, 0),
-            )
-        t0 = time.monotonic()
-        transcript = transcribe(wav_path)
-        log.info("transcribe took %.1fs => %r", time.monotonic() - t0, (transcript[:80] if transcript else "(empty)"))
-
-        if not transcript or self._is_stale(my_gen):
-            if not self._is_stale(my_gen):
-                log.info("empty transcript, returning to idle")
-                self._go_idle()
-            return
+            if not transcript or self._is_stale(my_gen):
+                if not self._is_stale(my_gen):
+                    log.info("empty transcript, returning to idle")
+                    self._go_idle()
+                return
 
         # --- Stream response from OpenClaw (with conversation context) ---
         if self._is_stale(my_gen):
@@ -241,9 +567,7 @@ class Assistant:
         # Update conversation history
         self._conversation_history.append({"role": "user", "content": transcript})
         self._conversation_history.append({"role": "assistant", "content": full_response})
-        max_msgs = config.CONVERSATION_HISTORY_LENGTH * 2
-        if len(self._conversation_history) > max_msgs:
-            self._conversation_history = self._conversation_history[-max_msgs:]
+        self._prune_history()
 
         self._dismiss.clear()
         self._dismiss.wait(timeout=self._response_hold_timeout)
