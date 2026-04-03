@@ -291,8 +291,21 @@ else:
     from record_audio import Recorder, check_audio_level
     from transcribe_openai import transcribe
     from openclaw_client import stream_response
-    from button_ptt import ButtonPTT, State
+    from button_ptt import ButtonPTT
     from tts_openai import TTSPlayer
+
+# State 枚举：硬件模式从 button_ptt 导入，测试模式用 Enum fallback
+try:
+    from button_ptt import State
+except (ImportError, ModuleNotFoundError):
+    from enum import Enum
+    class State(Enum):
+        IDLE = "idle"
+        LISTENING = "listening"
+        TRANSCRIBING = "transcribing"
+        THINKING = "thinking"
+        STREAMING = "streaming"
+        ERROR = "error"
 
 from datetime import datetime
 
