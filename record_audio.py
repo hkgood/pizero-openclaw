@@ -1,5 +1,6 @@
 import math
 import os
+import pathlib
 import signal
 import struct
 import subprocess
@@ -9,7 +10,7 @@ import wave
 import config
 
 # 录音文件放在用户专属目录，权限 600（仅本人可读写）
-_WAV_DIR = Path.home() / ".local" / "state" / "pizero-openclaw"
+_WAV_DIR = pathlib.Path.home() / ".local" / "state" / "pizero-openclaw"
 _WAV_DIR.mkdir(parents=True, exist_ok=True)
 _WAV_PATH = str(_WAV_DIR / "utterance.wav")
 
