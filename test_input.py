@@ -1,167 +1,122 @@
+#!/usr/bin/env python3
 """
-test_input.py — 测试模式专用：pygame 虚拟 PTT 按键 + 终端文本输入
-按住空格(hold-to-talk) → 终端输入文字 → 回车发送
+test_input.py — 测试模式专用 pygame 虚拟 PTT（独立子进程）
+监听空格键状态变化，通过 Unix socket 通知父进程。
+
+用法: python3 test_input.py
 """
+import json
+import socket
 import sys
-import threading
 
 try:
     import pygame
     pygame.init()
+    pygame.font.init()
 except Exception as e:
-    print("[test_input] pygame 未安装，请运行: pip3 install pygame")
-    print("Error:", e)
+    print(f"[test_input] pygame 初始化失败: {e}")
     sys.exit(1)
 
+SOCK_PATH = "/tmp/pizero-test-input.sock"
 
-from enum import Enum
+W, H = 260, 300
+RADIUS = 80
 
+def main():
+    screen = pygame.display.set_mode((W, H))
+    pygame.display.set_caption("pizero-openclaw TEST MODE")
+    font = pygame.font.SysFont("Menlo", 13)
+    font_big = pygame.font.SysFont("Menlo", 22)
+    font_hint = pygame.font.SysFont("Menlo", 10)
 
-class State(Enum):
-    IDLE = "idle"
-    LISTENING = "listening"
-    TRANSCRIBING = "transcribing"
+    phase = "idle"  # idle | listening | typing
+    clock = pygame.time.Clock()
 
-
-class TestInput:
-    W = 260
-    H = 300
-    RADIUS = 80
-    BG = (15, 15, 20)
-    BTN_IDLE = (50, 50, 60)
-    BTN_LISTENING = (60, 140, 255)
-    BTN_TRANSCRIBING = (0, 200, 100)
-    TEXT_COLOR = (220, 220, 220)
-    DIM_COLOR = (80, 80, 90)
-
-    def __init__(self):
-        pygame.font.init()
-        self.screen = pygame.display.set_mode((self.W, self.H))
-        pygame.display.set_caption("pizero-openclaw TEST MODE")
-        self.font = pygame.font.SysFont("Menlo", 13)
-        self.font_mic = pygame.font.SysFont("Menlo", 20)
-        self.font_hint = pygame.font.SysFont("Menlo", 10)
-
-        self.state = State.IDLE
-        self._lock = threading.Lock()
-        self._running = True
-        self._result = ""
-        self._input_done = threading.Event()
-        self._clock = pygame.time.Clock()
-
-        self._thread = threading.Thread(target=self._loop, daemon=True)
-        self._thread.start()
-
-    def _loop(self):
-        while self._running:
-            self._clock.tick(60)
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    self._running = False
+    while True:
+        clock.tick(60)
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                _send({"type": "quit"})
+                pygame.quit()
+                return
+            elif event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE:
+                    _send({"type": "quit"})
                     pygame.quit()
                     return
-                elif event.type == pygame.KEYDOWN:
-                    if event.key == pygame.K_ESCAPE:
-                        self._running = False
-                        pygame.quit()
-                        return
-                    if event.key == pygame.K_SPACE and self.state == State.IDLE:
-                        self._on_press()
-                elif event.type == pygame.KEYUP:
-                    if event.key == pygame.K_SPACE and self.state == State.LISTENING:
-                        self._on_release()
-            self._draw()
-        try:
-            pygame.quit()
-        except Exception:
-            pass
+                if event.key == pygame.K_SPACE:
+                    if phase == "idle":
+                        phase = "listening"
+                        _send({"type": "state", "phase": "listening"})
+                    elif phase == "listening":
+                        phase = "typing"
+                        _send({"type": "state", "phase": "typing"})
+            elif event.type == pygame.KEYUP:
+                if event.key == pygame.K_SPACE and phase == "listening":
+                    phase = "typing"
+                    _send({"type": "state", "phase": "typing"})
 
-    def _on_press(self):
-        with self._lock:
-            self.state = State.LISTENING
+        screen.fill((15, 15, 20))
 
-    def _on_release(self):
-        with self._lock:
-            self.state = State.TRANSCRIBING
-        print("")
-        print("-" * 40)
-        print("  Release SPACE - type your message in the terminal below")
-        print("-" * 40)
-        t = threading.Thread(target=self._do_input, daemon=True)
-        t.start()
+        # 标题
+        t = font_hint.render("pizero-openclaw TEST MODE", True, (80, 80, 90))
+        screen.blit(t, (W // 2 - t.get_width() // 2, 10))
 
-    def _do_input(self):
-        try:
-            line = sys.stdin.readline()
-            text = line.strip() if line else ""
-        except Exception:
-            text = ""
-        with self._lock:
-            self._result = text
-            self._input_done.set()
-            self.state = State.IDLE
+        # 底部状态文字
+        if phase == "idle":
+            st_txt, st_color = "hold SPACE to talk", (80, 80, 90)
+        elif phase == "listening":
+            st_txt, st_color = "RELEASE to send", (60, 140, 255)
+        else:
+            st_txt, st_color = "type + ENTER in terminal", (0, 200, 100)
+        st = font.render(st_txt, True, st_color)
+        screen.blit(st, (W // 2 - st.get_width() // 2, H - 48))
 
-    def _draw(self):
-        self.screen.fill(self.BG)
+        # 圆形按钮
+        btn_color = {
+            "idle": (50, 50, 60),
+            "listening": (60, 140, 255),
+            "typing": (0, 200, 100),
+        }[phase]
+        cx, cy = W // 2, H // 2 - 5
+        pygame.draw.circle(screen, btn_color, (cx, cy), RADIUS)
+        pygame.draw.circle(screen, (25, 25, 35), (cx, cy), RADIUS, 3)
 
-        title = self.font_hint.render("pizero-openclaw TEST MODE", True, self.DIM_COLOR)
-        self.screen.blit(title, ((self.W - title.get_width()) // 2, 10))
-
-        if self.state == State.IDLE:
-            st_txt = "hold SPACE to talk"
-            st_color = self.DIM_COLOR
-        elif self.state == State.LISTENING:
-            st_txt = "RELEASE to send"
-            st_color = self.BTN_LISTENING
-        elif self.state == State.TRANSCRIBING:
-            st_txt = "type + ENTER in terminal"
-            st_color = self.BTN_TRANSCRIBING
-        st = self.font.render(st_txt, True, st_color)
-        self.screen.blit(st, ((self.W - st.get_width()) // 2, self.H - 48))
-
-        with self._lock:
-            if self.state == State.IDLE:
-                btn_color = self.BTN_IDLE
-            elif self.state == State.LISTENING:
-                btn_color = self.BTN_LISTENING
-            elif self.state == State.TRANSCRIBING:
-                btn_color = self.BTN_TRANSCRIBING
-
-        cx = self.W // 2
-        cy = self.H // 2 - 5
-        pygame.draw.circle(self.screen, btn_color, (cx, cy), self.RADIUS)
-        pygame.draw.circle(self.screen, (25, 25, 35), (cx, cy), self.RADIUS, 3)
-
-        label = "MIC"
-        if self.state == State.LISTENING:
-            label = "REC"
-        elif self.state == State.TRANSCRIBING:
-            label = "SEND"
-        mic = self.font_mic.render(label, True, (255, 255, 255))
+        label = {"idle": "MIC", "listening": "REC", "typing": "SEND"}[phase]
+        mic = font_big.render(label, True, (255, 255, 255))
         mr = mic.get_rect(center=(cx, cy))
-        self.screen.blit(mic, mr)
+        screen.blit(mic, mr)
 
+        # 提示
         hints = []
-        if self.state == State.IDLE:
+        if phase == "idle":
             hints = ["HOLD SPACE to talk", "ESC to quit"]
-        elif self.state == State.LISTENING:
+        elif phase == "listening":
             hints = ["RELEASE SPACE", "to send"]
-        elif self.state == State.TRANSCRIBING:
+        else:
             hints = ["type in terminal", "ENTER to send"]
-        y = cy + self.RADIUS + 12
+        y = cy + RADIUS + 12
         for h in hints:
-            s = self.font_hint.render(h, True, self.TEXT_COLOR)
-            self.screen.blit(s, ((self.W - s.get_width()) // 2, y))
+            s = font_hint.render(h, True, (220, 220, 220))
+            screen.blit(s, (W // 2 - s.get_width() // 2, y))
             y += 15
 
-        esc = self.font_hint.render("ESC = quit", True, (55, 55, 65))
-        self.screen.blit(esc, (12, self.H - 22))
+        esc = font_hint.render("ESC = quit", True, (55, 55, 65))
+        screen.blit(esc, (12, H - 22))
 
         pygame.display.flip()
 
-    def close(self):
-        self._running = False
-        try:
-            pygame.quit()
-        except Exception:
-            pass
+
+def _send(msg: dict):
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(2)
+        s.connect(SOCK_PATH)
+        s.sendall((json.dumps(msg) + "\n").encode())
+        s.close()
+    except Exception:
+        pass
+
+
+if __name__ == "__main__":
+    main()

@@ -64,10 +64,23 @@ if _TEST_MODE:
     from record_audio import Recorder, check_audio_level
     from transcribe_openai import transcribe
     from openclaw_client import stream_response
-    from test_input import TestInput, State as _TestInputState
+    import subprocess
+    import socket
+    import json
+    from enum import Enum
+    class _TestInputState(Enum):
+        IDLE = "idle"
+        LISTENING = "listening"
+        TRANSCRIBING = "transcribing"
 
     class _TestModePTT:
-        """测试模式：pygame 虚拟 PTT 按键（空格按住说话）+ 终端文本输入。"""
+        """
+        测试模式：pygame 子进程显示虚拟 PTT 按钮（空格按住说话）。
+        终端文字输入在主进程处理。
+        流程：
+          IDLE → (空格按下) → LISTENING → (空格松开) → TRANSCRIBING
+          → 用户在终端输入文字 → 回车发送
+        """
         State = _TestInputState
 
         def __init__(self, board=None, on_press_cb=None, on_release_cb=None,
@@ -75,22 +88,110 @@ if _TEST_MODE:
                      on_any_press_cb=None, on_abort_listening_cb=None):
             self.state = _TestInputState.IDLE
             self._on_release = on_release_cb
-            self._test_input = TestInput()
-            self._input_ready = threading.Event()
+            self._input_ready = threading.Event()  # 通知主进程可以输入
+            self._input_done = threading.Event()   # 通知主进程输入已完成
+            self._result = ""
+            self._subprocess_ready = threading.Event()
+            self._running = True
+
+            # 启动 pygame 子进程
+            repo_dir = Path(__file__).parent.resolve()
+            script = repo_dir / "test_input.py"
+            self._proc = subprocess.Popen(
+                [sys.executable, str(script)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+            # socket 服务器线程：接收 pygame 子进程发来的状态
+            self._sock_path = "/tmp/pizero-test-input.sock"
+            self._listener = threading.Thread(target=self._listen, daemon=True)
+            self._listener.start()
+            self._subprocess_ready.wait(timeout=3)
             log.info("TestInput pygame 窗口已启动，按空格说话，回车发送")
 
+        def _listen(self):
+            """监听子进程发来的状态变化。"""
+            if os.path.exists(self._sock_path):
+                os.unlink(self._sock_path)
+            srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            srv.bind(self._sock_path)
+            srv.listen(1)
+            self._subprocess_ready.set()
+            buf = ""
+            while self._running:
+                try:
+                    srv.settimeout(0.5)
+                    conn, _ = srv.accept()
+                    buf = ""
+                    while True:
+                        chunk = conn.recv(256)
+                        if not chunk:
+                            break
+                        buf += chunk.decode("utf-8", errors="replace")
+                        while "\n" in buf:
+                            line, _, buf = buf.partition("\n")
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                msg = json.loads(line)
+                                self._handle_msg(msg)
+                            except Exception:
+                                pass
+                    conn.close()
+                except socket.timeout:
+                    continue
+                except Exception:
+                    break
+            try:
+                srv.close()
+            except Exception:
+                pass
+
+        def _handle_msg(self, msg):
+            t = msg.get("type", "")
+            if t == "quit":
+                self._running = False
+            elif t == "state":
+                phase = msg.get("phase", "idle")
+                if phase == "idle":
+                    self.state = _TestInputState.IDLE
+                elif phase == "listening":
+                    self.state = _TestInputState.LISTENING
+                elif phase == "typing":
+                    self.state = _TestInputState.TRANSCRIBING
+                    # 通知主线程开始读取输入
+                    self._input_ready.set()
+                    # 在子线程里读 stdin（主线程会等 _input_done）
+                    t = threading.Thread(target=self._do_input, daemon=True)
+                    t.start()
+
+        def _do_input(self):
+            try:
+                print("\n" + "-" * 40)
+                print("  Release SPACE — type your message below")
+                print("-" * 40)
+                line = sys.stdin.readline()
+                text = line.strip() if line else ""
+            except Exception:
+                text = ""
+            self._result = text
+            self._input_done.set()
+
         def start_listening(self):
-            # pygame 独立处理按键，这里只设置状态
             self.state = _TestInputState.LISTENING
 
         def wait_for_input(self, timeout=None):
-            # pygame 线程会设置 _input_done
-            return self._test_input._input_done.wait(timeout=timeout)
+            # 等输入完成（用户按回车）
+            return self._input_done.wait(timeout=timeout)
 
         def consume_input(self):
-            text = self._test_input._result
-            self._test_input._result = ""
-            self._test_input._input_done.clear()
+            text = self._result
+            self._result = ""
+            self._input_done.clear()
+            self._input_ready.clear()
             self.state = _TestInputState.IDLE
             return text
 
@@ -98,7 +199,13 @@ if _TEST_MODE:
             pass
 
         def cleanup(self):
-            self._test_input.close()
+            self._running = False
+            if hasattr(self, "_proc") and self._proc:
+                self._proc.terminate()
+            try:
+                os.unlink(self._sock_path)
+            except Exception:
+                pass
 
     ButtonPTT = _TestModePTT
 
