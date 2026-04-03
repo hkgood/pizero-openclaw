@@ -64,69 +64,43 @@ if _TEST_MODE:
     from record_audio import Recorder, check_audio_level
     from transcribe_openai import transcribe
     from openclaw_client import stream_response
+    from test_input import TestInput, State as _TestInputState
 
-    class _TextPTT:
-        """测试模式：用文本输入代替麦克风录音。"""
-        from enum import Enum
-        class State(Enum):
-            IDLE = "idle"
-            LISTENING = "listening"
-            TRANSCRIBING = "transcribing"
-            THINKING = "thinking"
-            STREAMING = "streaming"
-            ERROR = "error"
+    class _TestModePTT:
+        """测试模式：pygame 虚拟 PTT 按键（空格按住说话）+ 终端文本输入。"""
+        State = _TestInputState
 
         def __init__(self, board=None, on_press_cb=None, on_release_cb=None,
                      on_cancel_cb=None, cancel_allowed_cb=None,
                      on_any_press_cb=None, on_abort_listening_cb=None):
-            self.state = self.State.IDLE
+            self.state = _TestInputState.IDLE
             self._on_release = on_release_cb
-            self._thread = None
-            self._stop = threading.Event()
-            self._input_text = ""
+            self._test_input = TestInput()
             self._input_ready = threading.Event()
-
-        def _input_loop(self):
-            log.info("测试模式: 输入文字后按回车发送 (Ctrl+C 退出)")
-            while not self._stop.is_set():
-                try:
-                    line = input("\n> ").strip()
-                    if line:
-                        self._input_text = line
-                        self._input_ready.set()
-                        log.info(f"输入: {line[:50]}...")
-                except (EOFError, KeyboardInterrupt):
-                    break
+            log.info("TestInput pygame 窗口已启动，按空格说话，回车发送")
 
         def start_listening(self):
-            if self._thread and self._thread.is_alive():
-                return
-            self._input_ready.clear()
-            self._stop.clear()
-            self._thread = threading.Thread(target=self._input_loop, daemon=True)
-            self._thread.start()
+            # pygame 独立处理按键，这里只设置状态
+            self.state = _TestInputState.LISTENING
 
         def wait_for_input(self, timeout=None):
-            return self._input_ready.wait(timeout=timeout)
+            # pygame 线程会设置 _input_done
+            return self._test_input._input_done.wait(timeout=timeout)
 
         def consume_input(self):
-            text = self._input_text
-            self._input_text = ""
-            self._input_ready.clear()
+            text = self._test_input._result
+            self._test_input._result = ""
+            self._test_input._input_done.clear()
+            self.state = _TestInputState.IDLE
             return text
 
         def stop_listening(self):
-            self._stop.set()
-            if self._thread:
-                try:
-                    self._thread.join(timeout=1)
-                except RuntimeError:
-                    pass
+            pass
 
         def cleanup(self):
-            self.stop_listening()
+            self._test_input.close()
 
-    ButtonPTT = _TextPTT
+    ButtonPTT = _TestModePTT
 
     class _DisabledTTS:
         def __init__(self):
@@ -464,15 +438,20 @@ class Assistant:
                 self._go_idle()
 
     def _process_utterance_inner(self, my_gen: int):
-        # --- 测试模式：直接从文本输入获取 ---
+        # --- 测试模式：pygame 窗口监听空格，终端输入文字 ---
         if _TEST_MODE:
-            self.ptt.state = State.TRANSCRIBING
-            self.display.set_status("Processing...", color=(255,230,100), subtitle="Thinking")
+            # 等待 pygame 线程收到文字输入（_input_done 信号）
+            got_input = self.ptt.wait_for_input(timeout=120)
+            if not got_input:
+                log.info("test input timeout, returning to idle")
+                self._go_idle()
+                return
             transcript = self.ptt.consume_input()
             if not transcript:
                 log.info("empty input, returning to idle")
                 self._go_idle()
                 return
+            log.info("test input: %r", transcript[:80])
             log.info("test input: %r", transcript[:80])
         else:
             # --- 真实硬件模式：录音 → 转写 ---

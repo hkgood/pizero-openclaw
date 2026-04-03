@@ -3,7 +3,9 @@ Pillow>=9.0.0
 requests>=2.28.0
 python-dotenv>=1.0.0
 
+# ── 测试模式 GUI（macOS / Linux）─────────────────────────────────
+pygame>=2.0
+
 # ── 阿里云百炼 (Bailian) ───────────────────────────────────────
 # 语音识别 (FunASR) + TTS (Qwen TTS)
-# 安装: pip install dashscope
 dashscope
