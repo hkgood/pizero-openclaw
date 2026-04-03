@@ -1,5 +1,6 @@
 import re
 import socket
+import subprocess
 import sys
 import os
 import threading
@@ -131,6 +132,101 @@ def _wifi_connected() -> bool:
             return f.read().strip() == "up"
     except OSError:
         return False
+
+
+def _get_wifi_signal() -> tuple[bool, int]:
+    """Get WiFi signal strength. Returns (connected, strength_pct).
+    
+    strength_pct: 0-100 (0 = no signal, 100 = excellent).
+    connected=False 表示未连接，strength_pct 无意义。
+    支持 macOS 和 Linux/Raspberry Pi。
+    """
+    import subprocess
+
+    # ── macOS ─────────────────────────────────────────────────────────
+    if sys.platform == "darwin":
+        try:
+            # 检查 WiFi 是否启用且已连接
+            result = subprocess.run(
+                ["networksetup", "-getairportnetwork", "en0"],
+                capture_output=True, text=True, timeout=3,
+            )
+            output = result.stdout.strip()
+            # "You are not associated with an AirPort network." = 未连接
+            if "not associated" in output.lower() or result.returncode != 0:
+                return (False, 0)
+
+            # 获取信号强度（WiFi Signal Strength）
+            # macOS 没有直接的命令获取信号强度，用 airport 工具
+            airport_path = "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport"
+            if os.path.exists(airport_path):
+                ar_result = subprocess.run(
+                    [airport_path, "-I"],
+                    capture_output=True, text=True, timeout=3,
+                )
+                for line in ar_result.stdout.splitlines():
+                    line = line.strip().lower()
+                    if "agrctrssiindicator:" in line:
+                        # RSSI 值：-100（无信号）到 -30（极好）
+                        try:
+                            rssi = int(line.split(":")[-1].strip())
+                            # 映射到 0-100
+                            pct = max(0, min(100, int((rssi + 100) * 100 / 70)))
+                            return (True, pct)
+                        except (ValueError, IndexError):
+                            pass
+            return (True, 50)  # 连接了但拿不到强度，默认中等
+        except Exception:
+            return (False, 0)
+
+    # ── Linux / Raspberry Pi ─────────────────────────────────────────
+    # 读取 /proc/net/wireless 获取 signal level
+    try:
+        with open("/proc/net/wireless") as f:
+            for line in f:
+                if "wlan0" in line:
+                    parts = line.split()
+                    # 格式: wlan0: 0004 ....  link=58
+                    for part in parts:
+                        if part.startswith("link="):
+                            level = int(part.split("=")[1])
+                            # link=0-70 范围，映射到 0-100
+                            pct = max(0, min(100, int(level * 100 / 70)))
+                            return (True, pct)
+    except OSError:
+        pass
+
+    # 备选：iwconfig
+    try:
+        result = subprocess.run(
+            ["iwconfig", "wlan0"],
+            capture_output=True, text=True, timeout=3,
+        )
+        output = result.stdout + result.stderr
+        # 找 "Signal level=..." 行
+        import re
+        m = re.search(r"Signal level[=:](\S+)", output, re.IGNORECASE)
+        if m:
+            val_str = m.group(1).rstrip(" dBm")
+            try:
+                dbm = int(val_str)
+                # dBm 转百分比：-100dBm=0%, -30dBm=100%
+                pct = max(0, min(100, int((dbm + 100) * 100 / 70)))
+                return (True, pct)
+            except ValueError:
+                pass
+    except (OSError, FileNotFoundError):
+        pass
+
+    # 备选：检查 wlan0 是否 up
+    try:
+        with open("/sys/class/net/wlan0/operstate") as f:
+            if f.read().strip() == "up":
+                return (True, 50)  # 连接了但拿不到强度
+    except OSError:
+        pass
+
+    return (False, 0)
 
 
 def _read_pisugar_battery() -> tuple[int | None, str | None]:
@@ -481,6 +577,7 @@ class Display:
         self._battery_pct: int | None = None
         self._battery_status: str | None = None
         self._wifi_online = False
+        self._wifi_strength = 0  # 0-100
         self._battery_cache_stale = True  # 启动时强制刷新一次
         self._battery_thread = threading.Thread(target=self._battery_loop, daemon=True)
         self._battery_thread.start()
@@ -507,12 +604,14 @@ class Display:
 
     # ── 电池/WiFi 后台缓存（不阻塞 UI）──────────────────────────────────
     def _battery_loop(self):
-        """每 30 秒异步更新一次电池和 WiFi 状态，避免 socket 阻塞渲染线程。"""
+        """每 30 秒异步更新电池和 WiFi 状态，避免 socket 阻塞渲染线程。"""
         import time
         while True:
             try:
-                # WiFi 状态（轻量，开销极小）
-                self._wifi_online = _wifi_connected()
+                # WiFi 信号强度
+                connected, strength = _get_wifi_signal()
+                self._wifi_online = connected
+                self._wifi_strength = strength if connected else 0
                 # 电池（可能阻塞，最多 2 秒）
                 pct, status = _read_battery()
                 self._battery_pct = pct
@@ -661,11 +760,53 @@ class Display:
             buf.append(rgb565 & 0xFF)
         return buf
 
+    def _draw_wifi(self, draw: ImageDraw.ImageDraw):
+        """Draw WiFi signal bars in top-left corner. Uses cached values (updated every 30s).
+        
+        Draws 4 vertical bars representing signal strength:
+          ▐▌  1 bar  = 0-25%   (weak)
+          ▐██  2 bars = 25-50%  (fair)
+          ▐██▌ 3 bars = 50-75%  (good)
+          ▐███  4 bars = 75-100% (excellent)
+        """
+        x0 = self._pad_x
+        y_base = self._pad_y + 8
+        bar_w = 3
+        bar_gap = 2
+        bar_heights = [4, 7, 10, 13]  # heights of 4 bars (short to tall)
+        max_h = bar_heights[-1]
+        bar_count = max(1, min(4, self._wifi_strength * 4 // 100))
+
+        # 颜色：绿色渐变到红色
+        if self._wifi_strength >= 75:
+            bar_color = (0, 200, 80)      # 绿色 — 满格
+        elif self._wifi_strength >= 50:
+            bar_color = (150, 200, 0)    # 黄绿
+        elif self._wifi_strength >= 25:
+            bar_color = (220, 160, 0)    # 橙色
+        else:
+            bar_color = (200, 60, 60)     # 红色 — 很弱
+
+        dim_color = (60, 60, 60)  # 未激活的柱子
+
+        for i, h in enumerate(bar_heights):
+            xi = x0 + i * (bar_w + bar_gap)
+            yi = y_base + (max_h - h)  # 底部对齐
+            if i < bar_count:
+                draw.rectangle((xi, yi, xi + bar_w - 1, yi + h - 1), fill=bar_color)
+            else:
+                draw.rectangle((xi, yi, xi + bar_w - 1, yi + h - 1), fill=dim_color)
+
     def _draw_battery(self, draw: ImageDraw.ImageDraw):
-        """Draw battery + WiFi status in top corners. Uses cached values (updated every 30s)."""
+        """Draw WiFi signal bars (top-left) + battery percentage (top-right). Uses cached values (updated every 30s)."""
+        self._draw_wifi(draw)  # WiFi 信号柱（左上角）
+
         # 启动时如果缓存还没好，先读一次同步的（不阻塞主线程）
         if self._battery_cache_stale:
             try:
+                connected, strength = _get_wifi_signal()
+                self._wifi_online = connected
+                self._wifi_strength = strength if connected else 0
                 pct, status = _read_battery()
                 self._battery_pct = pct
                 self._battery_status = status
@@ -689,11 +830,6 @@ class Display:
         bx = self._width - tw - self._pad_x
         by = self._pad_y
         draw.text((bx, by), label, font=self._battery_font, fill=(120, 120, 120))
-
-        # WiFi 指示灯（顶部左侧，用缓存值）
-        wifi_label = "\u25cf" if self._wifi_online else "\u25cb"
-        wifi_color = (0, 180, 80) if self._wifi_online else (180, 60, 60)
-        draw.text((self._pad_x, self._pad_y), wifi_label, font=self._battery_font, fill=wifi_color)
 
     def _draw(self, image: Image.Image):
         buf = self._image_to_rgb565(image)

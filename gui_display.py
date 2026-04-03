@@ -115,13 +115,83 @@ class GUIPanel:
         self._subid = self._canvas.create_text(5*scale, 26*scale, text="",    fill="#666", font=self._f_reg,   anchor="nw")
         self._rid   = self._canvas.create_text(5*scale, 36*scale, text="",    fill="#E6EBF0", font=self._f_reg, anchor="nw", width=(240-10)*scale)
         self._batid = self._canvas.create_text(cw-5*scale, 5*scale, text="—", fill="#666", font=self._f_small, anchor="ne")
-        self._wfiid = self._canvas.create_text(5*scale, 5*scale, text="●",   fill="#00B450", font=self._f_small, anchor="nw")
         self._clkid = self._canvas.create_text(cw//2, 75*scale, text="",    fill="#DDD", font=self._f_clock, anchor="center")
         self._datid = self._canvas.create_text(cw//2, 105*scale, text="",   fill="#666", font=self._f_reg, anchor="center")
         self._hntid = self._canvas.create_text(cw//2, 222*scale, text="TEST MODE — press ENTER to talk", fill="#444", font=self._f_small, anchor="center")
 
+        # WiFi 信号柱（4 根柱子，左上角）
+        self._wifi_bars = []
+        bar_w = 3 * scale
+        bar_gap = 2 * scale
+        bar_heights = [4*scale, 7*scale, 10*scale, 13*scale]
+        max_h = bar_heights[-1]
+        y_base = 5 * scale + (max_h)  # 底部对齐基准线
+        for i, h in enumerate(bar_heights):
+            xi = 5 * scale + i * (bar_w + bar_gap)
+            yi = y_base - h
+            bar_id = self._canvas.create_rectangle(xi, yi, xi+bar_w, yi+h, fill="#555", outline="")
+            self._wifi_bars.append(bar_id)
+
         self._frame_count = 0
         self._render()
+
+        # 每 30 秒更新一次 WiFi 信号强度
+        def _wifi_loop():
+            while True:
+                try:
+                    import subprocess
+                    # macOS airport
+                    if sys.platform == "darwin":
+                        ap = "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport"
+                        if Path(ap).exists():
+                            out = subprocess.run([ap, "-I"], capture_output=True, text=True, timeout=3)
+                            for line in out.stdout.splitlines():
+                                line = line.strip()
+                                if "agrctrssiindicator:" in line.lower():
+                                    try:
+                                        rssi = int(line.split(":")[-1].strip())
+                                        self._wifi_strength = max(0, min(100, int((rssi+100)*100/70)))
+                                        self._wifi_online = True
+                                        break
+                                    except (ValueError, IndexError):
+                                        pass
+                except Exception:
+                    pass
+                time.sleep(30)
+
+        t = threading.Thread(target=_wifi_loop, daemon=True)
+        t.start()
+        self._wifi_strength = 75  # mock default
+        self._wifi_online = True
+
+    def _update_wifi_bars(self):
+        """Update WiFi signal bars based on current strength (0-100)."""
+        bar_heights = [4, 7, 10, 13]  # relative heights
+        max_h = bar_heights[-1]
+        # 每个柱子实际像素高度（相对于图标区高度 max_h）
+        heights_px = [4, 7, 10, 13]  # 实际像素
+        bar_count = max(1, min(4, self._wifi_strength * 4 // 100))
+        # 颜色
+        if self._wifi_strength >= 75:
+            active = "#00C850"
+        elif self._wifi_strength >= 50:
+            active = "#96C800"
+        elif self._wifi_strength >= 25:
+            active = "#DCA000"
+        else:
+            active = "#C83C3C"
+        dim = "#3C3C3C"
+        scale = self._scale
+        max_h_px = 13 * scale
+        y_base = 5 * scale + max_h_px
+        bar_w = 3 * scale
+        bar_gap = 2 * scale
+        heights_px = [4*scale, 7*scale, 10*scale, 13*scale]
+        for i, h_px in enumerate(heights_px):
+            xi = 5 * scale + i * (bar_w + bar_gap)
+            yi = y_base - h_px
+            color = active if i < bar_count else dim
+            self._canvas.itemconfig(self._wifi_bars[i], fill=color)
 
     def _render(self):
         s, sc, sc2, resp, accent = self._state, self._status_text, self._status_sub, self._response_buf, self._accent
@@ -138,7 +208,8 @@ class GUIPanel:
             self._canvas.itemconfig(self._datid, text=now.strftime("%a, %b %d"))
             self._canvas.itemconfig(self._hntid, text="TEST MODE — press ENTER to talk")
             self._canvas.itemconfig(self._batid, text="—")
-            self._canvas.itemconfig(self._wfiid, text="●")
+            # 更新 WiFi 信号柱
+            self._update_wifi_bars()
         else:
             self._canvas.itemconfig(self._clkid, text="")
             self._canvas.itemconfig(self._datid, text="")
@@ -146,6 +217,7 @@ class GUIPanel:
             self._canvas.itemconfig(self._sid,   text=sc)
             self._canvas.itemconfig(self._subid, text=sc2 or "")
             self._canvas.itemconfig(self._rid,   text=resp or "")
+            self._update_wifi_bars()
 
         self._frame_count += 1
         self._root.after(80, self._render)
