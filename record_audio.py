@@ -1,6 +1,7 @@
 import math
 import os
 import pathlib
+import platform
 import signal
 import struct
 import subprocess
@@ -8,6 +9,8 @@ import time
 import wave
 
 import config
+
+_IS_MAC = platform.system() == "Darwin"
 
 # 录音文件放在用户专属目录，权限 600（仅本人可读写）
 _WAV_DIR = pathlib.Path.home() / ".local" / "state" / "pizero-openclaw"
