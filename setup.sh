@@ -169,10 +169,11 @@ check_python() {
   PYTHON_CMD=""
   for py in python3 python3.11 python3.10 python3.9; do
     if command -v $py >/dev/null 2>&1; then
-      VER=$($py -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
-      if [[ $(echo "$VER >= 3.9" | bc -l 2>/dev/null || echo 0) == "1" ]] || [[ "${VER%%.*}" -ge 3 && "${VER##.*}" -ge 9 ]]; then
+      # 用 Python 自身判断版本，避免 bc/awk 兼容性问题
+      OK=$($py -c 'import sys; major, minor = sys.version_info.major, sys.version_info.minor; exit(0 if (major > 3 or (major == 3 and minor >= 9)) else 1)' 2>/dev/null && echo "yes" || echo "no")
+      if [[ "$OK" == "yes" ]]; then
         PYTHON_CMD=$py
-        log "Python: $($py --version)"
+        log "Python: $($py --version 2>&1 | head -1)"
         break
       fi
     fi
@@ -224,17 +225,17 @@ install_python_deps() {
   $PYTHON_CMD -m pip install --upgrade pip -q 2>/dev/null || true
   
   # 基础依赖
-  pip install -q -r requirements.txt 2>/dev/null || true
+  $PYTHON_CMD -m pip install -q -r "$REPO_DIR/requirements.txt" 2>/dev/null || true
   
   # 硬件依赖（如果检测到 Pi）
   if [[ "$IS_RPI" == "true" ]]; then
     info "检测到 Raspberry Pi，安装硬件依赖..."
-    pip install -q RPi.GPIO spidev 2>/dev/null || true
+    $PYTHON_CMD -m pip install -q RPi.GPIO spidev 2>/dev/null || true
     log "硬件依赖安装完成"
   fi
   
   # 可选依赖
-  pip install -q sox 2>/dev/null || true
+  $PYTHON_CMD -m pip install -q sox 2>/dev/null || true
   
   log "Python 依赖安装完成"
 }
