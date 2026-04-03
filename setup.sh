@@ -32,6 +32,7 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; CY
 NON_INTERACTIVE=false
 SKIP_DEPS=false
 SKIP_CONFIG=false
+SKIP_AUTOSTART=false
 AUTO_LAUNCH=false
 PROVIDER_OVERRIDE=""
 
@@ -49,6 +50,14 @@ while [[ $# -gt 0 ]]; do
       SKIP_CONFIG=true
       shift
       ;;
+    --skip-autostart)
+      SKIP_AUTOSTART=true
+      shift
+      ;;
+    --autostart)
+      ENABLE_AUTOSTART=true
+      shift
+      ;;
     --auto-launch)
       AUTO_LAUNCH=true
       shift
@@ -62,6 +71,8 @@ while [[ $# -gt 0 ]]; do
       echo "  --non-interactive   完全非交互（CI/自动化）"
       echo "  --skip-deps          跳过依赖安装"
       echo "  --skip-config        跳过配置步骤"
+      echo "  --skip-autostart     跳过自启动设置"
+      echo "  --autostart          非交互模式下自动设置自启动"
       echo "  --auto-launch        安装完自动启动"
       echo "  --provider <bailian|openai>  指定 AI 提供商"
       exit 0
@@ -116,6 +127,7 @@ detect_platform() {
   IS_RPI=false
   IS_MAC=false
   IS_LINUX=false
+  IS_DOCKER=false
   HAS_WHISPLAY=false
   HAS_AUDIO_IN=false
   HAS_AUDIO_OUT=false
@@ -133,6 +145,12 @@ detect_platform() {
   else
     IS_LINUX=true
     info "平台: Linux"
+  fi
+
+  # 检测 Docker 环境
+  if [[ -f /.dockerenv ]] || grep -q docker /proc/1/cgroup 2>/dev/null; then
+    IS_DOCKER=true
+    info "检测到 Docker 环境"
   fi
 
   # 检测音频设备
@@ -155,9 +173,13 @@ detect_platform() {
   # 汇总
   echo ""
   echo "硬件检测结果:"
-  echo "  平台:       $([[ "$IS_RPI" == "true" ]] && echo "Raspberry Pi" || echo "Desktop")"
+  echo "  平台:       $([[ "$IS_RPI" == "true" ]] && echo "Raspberry Pi" || [[ "$IS_DOCKER" == "true" ]] && echo "Docker" || echo "Desktop/Linux")"
   echo "  麦克风:     $([[ "$HAS_AUDIO_IN" == "true" ]] && echo "${GREEN}可用${NC}" || echo "${YELLOW}不可用${NC}")"
   echo "  扬声器:     $([[ "$HAS_AUDIO_OUT" == "true" ]] && echo "${GREEN}可用${NC}" || echo "${YELLOW}不可用${NC}")"
+  if [[ "$IS_DOCKER" == "true" ]]; then
+    echo ""
+    warn "Docker 环境：需要配置音频设备映射（--device /dev/snd）或 ALSA 环境变量"
+  fi
   echo ""
 }
 
@@ -208,6 +230,26 @@ else:
   fi
 }
 
+# ── 预检 sudo 权限 ─────────────────────────────────────────────
+check_sudo() {
+  if [[ "$IS_MAC" == "true" ]]; then
+    return  # macOS 不需要 sudo
+  fi
+  if [[ "$EUID" == "0" ]]; then
+    return  # 已以 root 运行
+  fi
+  if sudo -n true 2>/dev/null; then
+    return  # sudo 已缓存
+  fi
+  echo ""
+  info "此步骤需要 sudo 权限，请输入密码（如果没有 sudo 权限可跳过）..."
+  if sudo -v; then
+    log "sudo 权限验证成功"
+  else
+    warn "sudo 权限验证失败，部分安装可能受影响"
+  fi
+}
+
 # ── 安装系统依赖 ───────────────────────────────────────────────
 install_system_deps() {
   step "安装系统依赖..."
@@ -218,6 +260,8 @@ install_system_deps() {
       if ! command -v ffmpeg >/dev/null 2>&1; then
         log "安装 ffmpeg (用于音频处理)..."
         brew install ffmpeg
+      else
+        info "ffmpeg 已安装，跳过"
       fi
     else
       warn "Homebrew 未安装，跳过 ffmpeg"
@@ -227,9 +271,17 @@ install_system_deps() {
 
   # Linux / Raspberry Pi
   if command -v apt-get >/dev/null 2>&1; then
-    info "安装系统包 (可能需要 sudo 密码)..."
-    sudo apt-get update -qq
-    sudo apt-get install -y -qq \
+    # 预检 sudo
+    check_sudo
+    
+    info "更新软件包列表..."
+    if ! sudo apt-get update -qq 2>&1 | tail -3; then
+      warn "apt-get update 失败，继续尝试安装..."
+    fi
+    
+    info "安装系统包（python3-numpy, python3-pil, alsa-utils, sox, curl 等）..."
+    local pkg_errors=0
+    sudo apt-get install -y \
       python3-numpy \
       python3-pil \
       python3-pip \
@@ -237,8 +289,14 @@ install_system_deps() {
       sox \
       libsox-fmt-all \
       curl \
-      2>/dev/null || true
-    log "系统依赖安装完成"
+      git \
+      2>&1 | grep -E "(Setting up|Erasing|Processing|Unable|Error)" || true
+    
+    if [[ $? -eq 0 ]]; then
+      log "系统依赖安装完成"
+    else
+      warn "部分系统包安装失败，尝试继续..."
+    fi
   fi
 }
 
@@ -246,20 +304,29 @@ install_system_deps() {
 install_python_deps() {
   step "安装 Python 依赖..."
   
-  $PYTHON_CMD -m pip install --upgrade pip -q 2>/dev/null || true
+  info "升级 pip..."
+  $PYTHON_CMD -m pip install --upgrade pip 2>&1 | tail -2
   
   # 基础依赖
-  $PYTHON_CMD -m pip install -q -r "$REPO_DIR/requirements.txt" 2>/dev/null || true
+  info "安装基础依赖 (requirements.txt)..."
+  local base_errors=0
+  $PYTHON_CMD -m pip install -r "$REPO_DIR/requirements.txt" 2>&1 | tail -5 || base_errors=$?
   
   # 硬件依赖（如果检测到 Pi）
   if [[ "$IS_RPI" == "true" ]]; then
-    info "检测到 Raspberry Pi，安装硬件依赖..."
-    $PYTHON_CMD -m pip install -q -r "$REPO_DIR/requirements-pi.txt" 2>/dev/null || true
-    log "硬件依赖安装完成"
+    info "Raspberry Pi 环境，安装硬件依赖 (requirements-pi.txt)..."
+    if [[ -f "$REPO_DIR/requirements-pi.txt" ]]; then
+      $PYTHON_CMD -m pip install -r "$REPO_DIR/requirements-pi.txt" 2>&1 | tail -5
+    else
+      warn "requirements-pi.txt 不存在，跳过硬件依赖"
+    fi
   fi
   
   # 可选依赖
-  $PYTHON_CMD -m pip install -q sox 2>/dev/null || true
+  if command -v sox >/dev/null 2>&1; then
+    info "安装 sox Python 包..."
+    $PYTHON_CMD -m pip install sox 2>&1 | tail -2 || true
+  fi
   
   log "Python 依赖安装完成"
 }
@@ -438,36 +505,75 @@ verify_install() {
   step "验证安装..."
   
   local errors=0
+  local warnings=0
   
-  # 验证 Python 依赖
-  if ! $PYTHON_CMD -c "import numpy" 2>/dev/null; then
-    error "numpy 未安装"
-    ((errors++))
-  fi
-  if ! $PYTHON_CMD -c "from PIL import Image" 2>/dev/null; then
-    error "Pillow 未安装"
-    ((errors++))
-  fi
-  if ! $PYTHON_CMD -c "import dotenv" 2>/dev/null; then
-    error "python-dotenv 未安装"
-    ((errors++))
-  fi
-  if ! $PYTHON_CMD -c "import requests" 2>/dev/null; then
-    error "requests 未安装"
-    ((errors++))
+  echo ""
+  info "检查 Python 包..."
+  
+  # 验证核心 Python 依赖
+  for pkg in numpy PIL dotenv requests; do
+    if [[ "$pkg" == "PIL" ]]; then
+      if ! $PYTHON_CMD -c "from PIL import Image; print('OK')" 2>/dev/null | grep -q OK; then
+        error "Pillow 未安装或安装失败"
+        ((errors++))
+      else
+        log "  Pillow ✓"
+      fi
+    else
+      if ! $PYTHON_CMD -c "import $pkg; print('OK')" 2>/dev/null | grep -q OK; then
+        error "  $pkg 未安装"
+        ((errors++))
+      else
+        log "  $pkg ✓"
+      fi
+    fi
+  done
+  
+  # 检查可选依赖
+  echo ""
+  info "检查可选依赖..."
+  
+  if [[ "$IS_RPI" == "true" ]]; then
+    if ! $PYTHON_CMD -c "import RPi.GPIO" 2>/dev/null; then
+      warn "  RPi.GPIO 未安装（硬件模式需要）"
+      ((warnings++))
+    else
+      log "  RPi.GPIO ✓"
+    fi
+    
+    if ! $PYTHON_CMD -c "import spidev" 2>/dev/null; then
+      warn "  spidev 未安装（硬件模式需要）"
+      ((warnings++))
+    else
+      log "  spidev ✓"
+    fi
   fi
   
-  if [[ "$errors" -eq 0 ]]; then
-    log "Python 依赖验证通过"
+  # 检查 API Key
+  echo ""
+  if grep -q "DASHSCOPE_API_KEY\|OPENAI_API_KEY" "$REPO_DIR/.env" 2>/dev/null; then
+    if grep -E "DASHSCOPE_API_KEY=\"\"|OPENAI_API_KEY=\"\"" "$REPO_DIR/.env" >/dev/null 2>&1; then
+      warn ".env 中 API Key 为空，请填写"
+      ((warnings++))
+    else
+      log "API Key 已配置 ✓"
+    fi
   else
-    warn "有 $errors 个依赖问题，建议运行: pip install -r requirements.txt"
+    warn ".env 中未配置 API Key"
+    ((warnings++))
   fi
   
-  # 验证 .env
-  if [[ -f "$REPO_DIR/.env" ]]; then
-    log ".env 配置文件已就绪"
-  else
-    warn ".env 文件不存在"
+  # 汇总
+  echo ""
+  if [[ "$errors" -gt 0 ]]; then
+    error "有 $errors 个错误，建议修复后再运行"
+    info "手动修复依赖: pip install -r requirements.txt -r requirements-pi.txt"
+  fi
+  if [[ "$warnings" -gt 0 ]]; then
+    warn "有 $warnings 个警告，不影响测试模式运行"
+  fi
+  if [[ "$errors" -eq 0 && "$warnings" -eq 0 ]]; then
+    log "所有检查通过！"
   fi
   
   echo ""
@@ -498,6 +604,74 @@ launch_app() {
     echo "启动失败。请手动运行："
     echo "  cd ~/pizero-openclaw && ./run-openclaw.sh"
   }
+}
+
+# ── 设置 systemd 自启动 ───────────────────────────────────────────
+setup_autostart() {
+  # 仅支持 Linux systemd（Raspberry Pi / Debian / Ubuntu 等）
+  if [[ "$IS_MAC" == "true" ]] || [[ ! -d /run/systemd/system ]]; then
+    return
+  fi
+  
+  step "设置开机自启动..."
+  
+  # 预检 sudo
+  check_sudo
+  
+  local svc_file="$REPO_DIR/pizero-openclaw.service"
+  if [[ ! -f "$svc_file" ]]; then
+    warn "未找到 $svc_file，跳过自启动设置"
+    return
+  fi
+  
+  # 替换 service 文件中的路径占位符
+  local current_user="$(whoami)"
+  local current_group="$(id -gn)"
+  local svc_tmp="/tmp/pizero-openclaw-auto-$$.service"
+  
+  info "配置服务：用户=$current_user, 路径=$REPO_DIR"
+  
+  sed \
+    -e "s|^User=.*|User=$current_user|" \
+    -e "s|^Group=.*|Group=$current_group|" \
+    -e "s|^WorkingDirectory=.*|WorkingDirectory=$REPO_DIR|" \
+    -e "s|^ExecStart=.*|ExecStart=/usr/bin/python3 $REPO_DIR/main.py|" \
+    -e "s|^EnvironmentFile=.*|EnvironmentFile=$REPO_DIR/.env|" \
+    "$svc_file" > "$svc_tmp"
+  
+  echo ""
+  info "安装 systemd 服务..."
+  sudo cp "$svc_tmp" /etc/systemd/system/pizero-openclaw.service
+  sudo systemctl daemon-reload
+  
+  echo ""
+  info "启用开机自启..."
+  if sudo systemctl enable pizero-openclaw 2>&1 | grep -q "Created symlink"; then
+    log "自启动已启用"
+  else
+    warn "启用结果不明确，继续..."
+  fi
+  
+  echo ""
+  if _confirm "现在启动服务并查看日志？" "n"; then
+    echo ""
+    info "启动服务..."
+    sudo systemctl restart pizero-openclaw
+    sleep 3
+    echo ""
+    info "最近日志（Ctrl+C 退出）:"
+    sudo journalctl -u pizero-openclaw -f --no-pager
+  fi
+  
+  rm -f "$svc_tmp"
+  log "自启动设置完成！"
+  echo ""
+  echo "常用命令："
+  echo "  sudo systemctl status pizero-openclaw   # 查看状态"
+  echo "  sudo systemctl restart pizero-openclaw   # 重启"
+  echo "  sudo journalctl -u pizero-openclaw -f    # 查看日志"
+  echo "  sudo systemctl disable pizero-openclaw  # 取消自启"
+  echo ""
 }
 
 # ── 主流程 ─────────────────────────────────────────────────────
@@ -543,6 +717,27 @@ main() {
 
   choose_mode
   verify_install
+
+  # ── 自启动设置 ────────────────────────────────────────────────────
+  if [[ "$SKIP_AUTOSTART" == "true" ]]; then
+    info "跳过自启动设置（--skip-autostart）"
+  elif [[ "$IS_RPI" == "true" ]] && [[ -d /run/systemd/system ]]; then
+    echo ""
+    if [[ "$NON_INTERACTIVE" == "true" ]]; then
+      if [[ "$ENABLE_AUTOSTART" == "true" ]]; then
+        setup_autostart
+      else
+        info "跳过自启动设置（非交互模式）"
+        info "如需设置自启动: ENABLE_AUTOSTART=true ./setup.sh --non-interactive"
+      fi
+    else
+      if _confirm "是否设置开机自启动（systemd）？" "n"; then
+        setup_autostart
+      else
+        info "跳过自启动设置"
+      fi
+    fi
+  fi
 
   echo ""
   echo -e "${CYAN}╔════════════════════════════════════════════════════╗${NC}"

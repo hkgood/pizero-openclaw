@@ -31,16 +31,25 @@
 ### 一键安装（任意终端，一行命令）
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/hkgood/pizero-openclaw/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/hkgood/pizero-openclaw/main/install.sh -o /tmp/install.sh && chmod +x /tmp/install.sh && /tmp/install.sh
 ```
+
+> ⚠️ 不要直接 `curl | bash`（不支持交互输入），请先下载再运行。
 
 `install.sh` 会自动克隆仓库并运行安装向导。没有 WhisPlay 硬件的机器会自动进入**测试模式**。
 
-非交互式安装（CI / 自动化）：
+**非交互式安装（CI / 自动化）：**
 ```bash
 DASHSCOPE_API_KEY=your-key OPENCLAW_TOKEN=your-token \
   ./install.sh --non-interactive
 ```
+
+**环境变量说明：**
+- `DASHSCOPE_API_KEY` — 阿里云百炼 API Key
+- `OPENCLAW_TOKEN` — OpenClaw Gateway Token
+- `OPENCLAW_BASE_URL` — Gateway 地址（默认 `http://localhost:18789`）
+- `INSTALL_BRANCH` — Git 分支（默认 `main`）
+- `ENABLE_AUTOSTART` — 非交互模式下自动设置 systemd 自启动（`true`）
 
 ### 克隆后本地安装
 
@@ -52,12 +61,14 @@ chmod +x setup.sh install.sh
 ```
 
 `setup.sh` 会自动：
-- 检测硬件环境（Raspberry Pi / macOS / Linux）
-- 安装系统依赖和 Python 依赖
+- 检测硬件环境（Raspberry Pi / macOS / Linux / Docker）
+- 安装系统依赖（需要 sudo 权限，会提前提示）
+- 安装 Python 依赖（基础 + 硬件专用）
 - 引导配置 API Key
 - 根据硬件情况选择运行模式
+- 询问并设置 systemd 开机自启动（仅 Raspberry Pi / Linux）
 
-## 测试模式（Mac / 无 WhisPlay 硬件）
+### 测试模式（Mac / 无 WhisPlay 硬件）
 
 在没有 WhisPlay 的机器上（macOS / Linux / 树莓派未装驱动），程序自动进入**测试模式**：
 
@@ -83,25 +94,30 @@ git clone https://github.com/hkgood/pizero-openclaw.git
 cd pizero-openclaw
 ```
 
-### 2. 安装系统包
+### 2. 安装系统依赖
 
 ```bash
-# Raspberry Pi
+# Raspberry Pi / Debian / Ubuntu
 sudo apt update
 sudo apt install python3-numpy python3-pil python3-pip alsa-utils sox libsox-fmt-all git curl
 
 # macOS（需要先安装 homebrew）
-brew install sox
+brew install sox ffmpeg
 ```
 
-### 3. 安装 Python 包
+安装向导会在需要 sudo 时提前提示密码。如果当前用户没有 sudo 权限，可以跳过（部分功能可能受限）。
+
+### 3. 安装 Python 依赖
 
 ```bash
 # 基础依赖
 pip3 install -r requirements.txt
 
-# Raspberry Pi 硬件依赖
+# Raspberry Pi 硬件依赖（仅 Pi 环境需要）
 pip3 install -r requirements-pi.txt
+
+# 或者一起安装：
+pip3 install -r requirements.txt -r requirements-pi.txt
 ```
 
 ### 4. 配置
@@ -132,18 +148,86 @@ export OPENCLAW_TOKEN="your-openclaw-gateway-token"
 
 ### 6. 部署 systemd 服务（Pi）
 
-编辑 `pizero-openclaw.service` 里的路径和用户名，然后：
+安装向导支持自动设置自启动（交互模式下会询问），也可手动完成：
 
+```bash
+# 方式 A：安装向导自动设置（推荐）
+./setup.sh
+# 选择"是否设置开机自启动" → yes
+
+# 方式 B：手动设置
+# 编辑服务文件（路径和用户名），然后：
+sudo cp pizero-openclaw.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable pizero-openclaw
+sudo systemctl start pizero-openclaw
+```
+
+**远程部署（从 Mac 推送到 Pi）：**
 ```bash
 ./sync.sh
 # 或指定主机：
 PI_HOST=pi@192.168.1.100 ./sync.sh
 ```
 
-查看日志：
+**查看日志：**
 ```bash
 sudo journalctl -u pizero-openclaw -f
 ```
+
+**其他常用命令：**
+```bash
+sudo systemctl status pizero-openclaw   # 查看状态
+sudo systemctl restart pizero-openclaw   # 重启
+sudo systemctl disable pizero-openclaw  # 取消自启
+```
+
+## 安装流程图
+
+```
+┌─────────────────────────────────────────────┐
+│  curl -fsSL .../install.sh -o install.sh   │
+│  chmod +x install.sh && ./install.sh       │
+└─────────────────┬───────────────────────────┘
+                  ▼
+┌─────────────────────────────────────────────┐
+│  检测环境（TTY / GitHub 下载 / 已有目录）  │
+└─────────────────┬───────────────────────────┘
+                  ▼
+┌─────────────────────────────────────────────┐
+│  克隆 / 更新代码到 ~/pizero-openclaw       │
+└─────────────────┬───────────────────────────┘
+                  ▼
+┌─────────────────────────────────────────────┐
+│  setup.sh — 自动化安装向导                  │
+│  ├── 检测平台 (RPi / macOS / Linux / Docker) │
+│  ├── 预检 sudo 权限                         │
+│  ├── 安装系统依赖                          │
+│  ├── 安装 Python 依赖（基础 + 硬件）        │
+│  ├── 配置 API Key                          │
+│  ├── 验证安装                              │
+│  └── 设置 systemd 开机自启动（可选）        │
+└─────────────────┬───────────────────────────┘
+                  ▼
+┌─────────────────────────────────────────────┐
+│  完成 → ./run-openclaw.sh 启动             │
+                  ▼
+┌─────────────────────────────────────────────┐
+│  完成 → ./run-openclaw.sh 启动             │
+└─────────────────────────────────────────────┘
+```
+
+## Docker 环境
+
+在 Docker 中运行时需要注意音频设备映射：
+
+```bash
+docker run --device /dev/snd:/dev/snd \
+           -e ALSA_CARD=0 \
+           your-image
+```
+
+或者使用 ALSA 环境变量映射到主机设备。安装脚本会检测 Docker 环境并给出相应提示。
 
 ## 配置参数
 
@@ -189,6 +273,9 @@ export OPENAI_API_KEY="sk-..."
 
 ## 故障排除
 
+### 安装时提示 sudo 密码
+安装向导会在需要 sudo 权限前提前提示。如果跳过，部分系统包会安装失败，但 Python 依赖仍可继续。
+
 ### `ModuleNotFoundError: No module named 'WhisPlay'`
 WhisPlay 驱动未安装，程序自动切换到**测试模式**。如需硬件模式：
 ```bash
@@ -197,7 +284,10 @@ export WHISPLAY_DRIVER_PATH=~/Whisplay/Driver
 
 ### `No module named 'spidev'` 或 `No module named 'RPi'`
 ```bash
-pip install -r requirements-pi.txt
+# 基础依赖（可能已有）
+pip3 install -r requirements.txt
+# Pi 硬件依赖
+pip3 install -r requirements-pi.txt
 ```
 
 ### `PermissionError: ... log file`
@@ -208,6 +298,28 @@ rm -f ~/.local/state/pizero-openclaw.log
 
 ### WhisPlay 按钮无反应
 可能是 GPIO 中断注册失败，WhisPlay 驱动会自动降级到轮询，不影响使用。
+
+### Docker 中无音频设备
+```bash
+# 方案 A：映射 ALSA 设备
+docker run --device /dev/snd:/dev/snd your-image
+
+# 方案 B：使用 PulseAudio
+docker run -e PULSE_SERVER=unix:/run/user/1000/pulse/pulseaudio.socket ...
+
+# 方案 C：只运行测试模式（不需要音频）
+export TEST_MODE=true && ./run-openclaw.sh
+```
+
+### 安装验证失败
+如果 `setup.sh` 结尾验证有警告，可手动检查：
+```bash
+# 检查 Python 包
+python3 -c "import numpy; import PIL; import dotenv; import requests; print('OK')"
+
+# 重新安装依赖
+pip3 install -r requirements.txt -r requirements-pi.txt
+```
 
 ## 项目结构
 
@@ -223,12 +335,13 @@ record_audio.py       — ALSA 录音，文件权限 600 保护隐私
 button_ptt.py         — 按键状态机（PTT）
 config.py             — 集中配置（从 .env 加载）
 setup.sh             — 自动化安装向导（交互 + 非交互）
-install.sh           — 一键安装入口（curl | bash）
+install.sh           — 一键安装入口（curl 下载再运行）
 run-openclaw.sh      — 启动脚本（兼容 systemd EnvironmentFile）
 sync.sh              — 部署脚本（rsync + systemd）
 pizero-openclaw.service — systemd 服务模板
 requirements.txt      — 基础依赖
-requirements-pi.txt   — Raspberry Pi 硬件依赖
+requirements-pi.txt   — Raspberry Pi 硬件依赖（不含 dashscope）
+.env.example          — 配置模板
 ```
 
 ## License
