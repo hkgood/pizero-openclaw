@@ -89,7 +89,8 @@ def stream_response(
     Yields text deltas as they arrive via SSE.
     兼容多种 SSE 事件格式，防止丢 token。
     """
-    url = f"{config.OPENCLAW_BASE_URL}/v1/responses"
+    base = config.OPENCLAW_BASE_URL.rstrip("/")
+    url = f"{base}/v1/responses"
     headers = {
         "Authorization": f"Bearer {config.OPENCLAW_TOKEN}",
         "Content-Type": "application/json",

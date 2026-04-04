@@ -618,6 +618,17 @@ setup_autostart() {
   # 预检 sudo
   check_sudo
   
+  # ── 修复 .env 格式（去掉 export 前缀，让 systemd EnvironmentFile 能正确读取）───
+  if [[ -f "$REPO_DIR/.env" ]]; then
+    local env_fixed=false
+    if grep -q "^export " "$REPO_DIR/.env" 2>/dev/null; then
+      info "修复 .env 格式（去掉 export 前缀，使 systemd 可正确读取）..."
+      sed -i.bak "s/^export //g" "$REPO_DIR/.env"
+      log ".env 已修复，备份保存在 .env.bak"
+      env_fixed=true
+    fi
+  fi
+  
   local svc_file="$REPO_DIR/pizero-openclaw.service"
   if [[ ! -f "$svc_file" ]]; then
     warn "未找到 $svc_file，跳过自启动设置"
