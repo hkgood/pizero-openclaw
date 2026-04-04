@@ -60,6 +60,15 @@ def _sign_nonce(nonce: str, timestamp: str, private_key_pem: str) -> str:
     return base64.b64encode(signature).decode()
 
 
+def _get_origin(base_url: str) -> str:
+    """Extract origin from base URL."""
+    if base_url.startswith("https://"):
+        return f"https://{base_url[8:]}"
+    elif base_url.startswith("http://"):
+        return f"http://{base_url[7:]}"
+    return f"http://{base_url}"
+
+
 def stream_response(
     user_text: str,
     history: list[dict] | None = None,
@@ -76,6 +85,7 @@ def stream_response(
 
     token = config.OPENCLAW_TOKEN
     base_url = config.OPENCLAW_BASE_URL.rstrip("/")
+    origin = _get_origin(base_url)
 
     if base_url.startswith("http://"):
         ws_url = "ws://" + base_url[7:]
@@ -102,7 +112,10 @@ def stream_response(
     try:
         ws = websocket.create_connection(
             ws_url,
-            header=[f"Authorization: Bearer {token}"],
+            header=[
+                f"Authorization: Bearer {token}",
+                f"Origin: {origin}",
+            ],
             timeout=30,
         )
     except Exception as e:
