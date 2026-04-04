@@ -14,6 +14,7 @@ import config
 try:
     import websocket
     from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
     from cryptography.hazmat.primitives.asymmetric import ec
     from cryptography.hazmat.backends import default_backend
 except ImportError:
@@ -54,10 +55,20 @@ def _sign_nonce(nonce: str, timestamp: str, private_key_pem: str) -> str:
     )
 
     message = f"{nonce}:{timestamp}".encode()
-    signature = private_key.sign(message, ec.ECDSA(hashes.SHA256()))
-
+    der_signature = private_key.sign(message, ec.ECDSA(hashes.SHA256()))
+    
+    # Decode DER signature to raw r||s format
+    from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
+    r, s = decode_dss_signature(der_signature)
+    
+    # Pack r and s as 32-byte big-endian integers
+    import struct
+    r_bytes = r.to_bytes(32, 'big')
+    s_bytes = s.to_bytes(32, 'big')
+    raw_signature = r_bytes + s_bytes
+    
     import base64
-    return base64.b64encode(signature).decode()
+    return base64.b64encode(raw_signature).decode()
 
 
 def _get_origin(base_url: str) -> str:
