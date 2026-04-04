@@ -129,11 +129,11 @@ def stream_response(
                 "minProtocol": 1,
                 "maxProtocol": 32,
                 "client": {
-                    "id": "pizero-openclaw",
+                    "id": "cli",
+                    "mode": "cli",
                     "version": "1.0.0",
                     "platform": "linux",
                 },
-                "deviceId": device_id,
             },
         }
         ws.send(json.dumps(connect_msg))
