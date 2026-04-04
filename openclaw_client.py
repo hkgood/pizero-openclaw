@@ -126,7 +126,13 @@ def stream_response(
             "method": "connect",
             "id": connect_id,
             "params": {
-                "host": base_url.replace("http://", "").replace("https://", ""),
+                "minProtocol": 1,
+                "maxProtocol": 32,
+                "client": {
+                    "id": "pizero-openclaw",
+                    "version": "1.0.0",
+                    "platform": "linux",
+                },
                 "deviceId": device_id,
             },
         }
