@@ -125,8 +125,8 @@ def stream_response(
             ws_url,
             header=[
                 f"Authorization: Bearer {token}",
-                f"Origin: {origin}",
             ],
+            http_origin=origin,
             timeout=30,
         )
     except Exception as e:
