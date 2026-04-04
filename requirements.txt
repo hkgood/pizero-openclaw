@@ -3,6 +3,7 @@ Pillow>=9.0.0
 requests>=2.28.0
 python-dotenv>=1.0.0
 websocket-client>=1.0.0
+cryptography>=41.0.0
 
 # ── 测试模式 GUI（macOS / Linux）─────────────────────────────────
 pygame>=2.0

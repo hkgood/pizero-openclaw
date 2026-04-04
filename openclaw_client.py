@@ -1,82 +1,74 @@
 """
 OpenClaw Gateway WebSocket client with full pairing and challenge-response support.
+Uses ECDSA signing for device authentication.
 """
 import hashlib
-import hmac
 import json
 import logging
-import time
+import os
 import uuid as uuid_module
 from typing import Generator
 
 try:
     import websocket
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.hazmat.backends import default_backend
 except ImportError:
     websocket = None
+    hashes = None
+    serialization = None
+    ec = None
+    default_backend = None
 
 import config
 
 log = logging.getLogger("openclaw")
 
+# Path to device identity file (can be exported from server)
+IDENTITY_FILE = os.path.expanduser("~/.openclaw/identity/device.json")
 
-def _generate_device_id() -> str:
-    """
-    Generate a stable device ID. First checks for a cached ID in
-    ~/.local/state/pizero-openclaw/device-id, then falls back to
-    machine characteristics and caches the result.
-    """
-    import os
-    state_dir = os.path.expanduser("~/.local/state/pizero-openclaw")
-    id_file = os.path.join(state_dir, "device-id")
-    
-    # Try to load cached device ID
-    try:
-        if os.path.exists(id_file):
-            with open(id_file, "r") as f:
-                cached = f.read().strip()
-            if cached:
-                return cached
-    except Exception:
-        pass
-    
-    # Derive device ID from machine characteristics
-    machine_id = None
-    for path in ["/etc/machine-id", "/sys/class/dmi/id/product_uuid"]:
+
+def _load_identity() -> dict | None:
+    """Load device identity from file."""
+    if os.path.exists(IDENTITY_FILE):
         try:
-            with open(path, "r") as f:
-                machine_id = f.read().strip()
-                if machine_id:
-                    break
-        except Exception:
-            pass
-    
-    if not machine_id:
-        # Last resort: use network MAC address
-        mac = str(uuid_module.getnode())
-        machine_id = mac
-    
-    device_id = hashlib.sha256(machine_id.encode()).hexdigest()[:32]
-    
-    # Cache it for next time
-    try:
-        os.makedirs(state_dir, exist_ok=True)
-        with open(id_file, "w") as f:
-            f.write(device_id)
-    except Exception:
-        pass
-    
-    return device_id
+            with open(IDENTITY_FILE, "r") as f:
+                return json.load(f)
+        except Exception as e:
+            log.warning("Failed to load identity from %s: %s", IDENTITY_FILE, e)
+    return None
 
 
-def _sign_nonce(nonce: str, timestamp: str, device_id: str, token: str) -> str:
-    """Sign the challenge nonce using HMAC-SHA256."""
-    msg = f"{nonce}:{timestamp}:{device_id}"
-    sig = hmac.new(
-        token.encode(),
-        msg.encode(),
-        hashlib.sha256
-    ).hexdigest()
-    return sig
+def _sign_with_ecdsa(nonce: str, timestamp: str, private_key_pem: str) -> str:
+    """
+    Sign the challenge nonce using ECDSA (P-256 curve).
+    Returns base64-encoded signature.
+    """
+    if hashes is None:
+        raise RuntimeError("cryptography library not installed. Run: pip3 install cryptography")
+
+    # Load private key
+    private_key = serialization.load_pem_private_key(
+        private_key_pem.encode(),
+        password=None,
+        backend=default_backend()
+    )
+
+    # The message to sign: nonce:timestamp
+    message = f"{nonce}:{timestamp}".encode()
+
+    # Sign with ECDSA using P-256 curve
+    signature = private_key.sign(message, ec.ECDSA(hashes.SHA256()))
+
+    # Return base64 encoded signature
+    import base64
+    return base64.b64encode(signature).decode()
+
+
+def _generate_device_id_from_identity(identity: dict) -> str:
+    """Get device ID from identity file."""
+    return identity.get("deviceId", "")
 
 
 def stream_response(
@@ -92,6 +84,10 @@ def stream_response(
         raise RuntimeError(
             "websocket-client not installed. Run: pip3 install websocket-client"
         )
+    if hashes is None:
+        raise RuntimeError(
+            "cryptography not installed. Run: pip3 install cryptography"
+        )
 
     token = config.OPENCLAW_TOKEN
     base_url = config.OPENCLAW_BASE_URL.rstrip("/")
@@ -104,8 +100,21 @@ def stream_response(
     else:
         ws_url = f"ws://{base_url}"
 
-    device_id = _generate_device_id()
-    request_id = str(uuid_module.uuid4())
+    # Load identity
+    identity = _load_identity()
+    if not identity:
+        raise RuntimeError(
+            f"No device identity found. "
+            f"Create {IDENTITY_FILE} or export identity from OpenClaw CLI."
+        )
+
+    device_id = _generate_device_id_from_identity(identity)
+    if not device_id:
+        raise RuntimeError("Identity file missing deviceId")
+
+    private_key_pem = identity.get("privateKeyPem", "")
+    if not private_key_pem:
+        raise RuntimeError("Identity file missing privateKeyPem")
 
     log.info("Connecting to %s (device_id=%s)", ws_url, device_id[:8])
 
@@ -152,7 +161,7 @@ def stream_response(
             nonce = payload.get("nonce")
             ts = payload.get("ts")
             if nonce and ts:
-                sig = _sign_nonce(nonce, str(ts), device_id, token)
+                sig = _sign_with_ecdsa(nonce, str(ts), private_key_pem)
                 challenge_resp = {
                     "type": "req",
                     "method": "connect.challenge",
