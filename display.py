@@ -1040,15 +1040,14 @@ class Display:
             if img.size != (self._width, self._height):
                 img = img.resize((self._width, self._height), Image.NEAREST)
 
-            # ── 说话时：底部叠加当前正在朗读的文字 ───────────────────────
+            # ── 说话时：底部叠加当前正在朗读的文字（无背景，上移避开颜色线）──
             if eye_state == "talking" and tts is not None:
                 sub_text = tts.current_text
                 if sub_text:
                     sub_text = _clean_markdown(sub_text)
                     draw = ImageDraw.Draw(img)
-                    bar_y = self._height - 34
-                    draw.rectangle((0, bar_y, self._width, self._height),
-                                   fill=(10, 10, 18))
+                    # 文字 y：距底部 32px，避开最底部 3px 颜色线并留余量
+                    text_y = self._height - 32
                     sub_text = self._truncate_text(
                         sub_text, self._response_font,
                         self._width - self._pad_x * 2, self._emoji_response,
@@ -1057,9 +1056,9 @@ class Display:
                         sub_text, self._response_font, self._emoji_response)
                     sx = max(self._pad_x, (self._width - int(sw)) // 2)
                     self._draw_mixed(
-                        draw, (sx, bar_y + 8), sub_text,
+                        draw, (sx, text_y), sub_text,
                         self._response_font, self._emoji_response,
-                        (200, 210, 225),
+                        (255, 255, 255),
                         max_x=self._width - self._pad_x,
                     )
 
