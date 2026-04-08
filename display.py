@@ -25,8 +25,20 @@ _WHISPLAY_DRIVER_PATH = os.environ.get(
 sys.path.insert(0, _WHISPLAY_DRIVER_PATH)
 from WhisPlay import WhisPlayBoard  # pyright: ignore[reportMissingImports]
 
-_FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-_FONT_PATH_REGULAR = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+def _pick_font(candidates: list[str]) -> str:
+    for p in candidates:
+        if os.path.exists(p):
+            return p
+    return candidates[-1]
+
+_FONT_PATH = _pick_font([
+    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+])
+_FONT_PATH_REGULAR = _pick_font([
+    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+])
 _EMOJI_FONT_PATHS = [
     "/usr/share/fonts/opentype/noto/NotoColorEmoji.ttf",
     "/usr/share/fonts/truetype/noto/NotoEmoji-Regular.ttf",
