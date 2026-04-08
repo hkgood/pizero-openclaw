@@ -69,10 +69,15 @@ class Recorder:
         if self.is_recording:
             return
 
+        # 删除旧文件，防止 arecord 启动失败时透明复用过期录音
+        if os.path.exists(_WAV_PATH):
+            try:
+                os.remove(_WAV_PATH)
+            except OSError:
+                pass
+
         # 设置录音文件权限：仅本人可读写（600）
         os.chmod(_WAV_DIR, 0o700)
-        if os.path.exists(_WAV_PATH):
-            os.chmod(_WAV_PATH, 0o600)
 
         cmd = [
             "arecord",
@@ -130,6 +135,10 @@ class Recorder:
             if stderr:
                 print(f"[rec] stderr: {stderr}")
             _dump_audio_info()
+
+        # 录音设备错误时明确抛出，防止静默复用旧文件
+        if stderr and ("error" in stderr.lower() or "cannot" in stderr.lower()):
+            raise RuntimeError(f"Recording device error: {stderr.strip()[:200]}")
 
         # 录音结束立即设权限，防止中间被其他进程读取
         os.chmod(_WAV_PATH, 0o600)
