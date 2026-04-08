@@ -195,35 +195,31 @@ class TTSPlayer:
             print("[tts/bailian] failed to parse JSON response")
             return None
 
-        # The audio may be returned as base64 in output_audio.audio_data
-        audio_data = (
-            data.get("output", {})
-            .get("audio", {})
-            .get("audio_data")
-        )
-        if not audio_data:
-            # Fallback: check for URL in output
-            audio_url = (
-                data.get("output", {})
-                .get("audio", {})
-                .get("audio_url")
-            )
-            if audio_url:
-                # Download from URL
-                try:
-                    audio_resp = requests.get(audio_url, timeout=30)
-                    if audio_resp.status_code == 200:
-                        return audio_resp.content
-                except Exception as e:
-                    print(f"[tts/bailian] failed to download audio from URL: {e}")
-            print(f"[tts/bailian] no audio data in response: {str(data)[:200]}")
-            return None
+        # Official API response: output.audio.data (base64, streaming only)
+        # or output.audio.url (download URL, always present in non-streaming)
+        audio_obj = data.get("output", {}).get("audio", {})
+        audio_data = audio_obj.get("data") or ""
+        audio_url = audio_obj.get("url") or ""
 
-        import base64
-        try:
-            wav_data = base64.b64decode(audio_data)
-        except Exception as e:
-            print(f"[tts/bailian] failed to decode base64 audio: {e}")
+        if audio_data:
+            import base64
+            try:
+                wav_data = base64.b64decode(audio_data)
+            except Exception as e:
+                print(f"[tts/bailian] failed to decode base64 audio: {e}")
+                return None
+        elif audio_url:
+            try:
+                audio_resp = requests.get(audio_url, timeout=30)
+                if audio_resp.status_code != 200:
+                    print(f"[tts/bailian] URL download failed {audio_resp.status_code}")
+                    return None
+                wav_data = audio_resp.content
+            except Exception as e:
+                print(f"[tts/bailian] failed to download audio from URL: {e}")
+                return None
+        else:
+            print(f"[tts/bailian] no audio data in response: {str(data)[:200]}")
             return None
 
         # Apply volume boost via sox if available
