@@ -169,7 +169,7 @@ export OPENCLAW_SESSION_KEY="main"
 例如从 Pi Zero 连接 Orange Pi：
 
 ```bash
-ssh -N -L 18789:127.0.0.1:18789 rocky@100.108.209.26
+ssh -N -L 18789:127.0.0.1:18789 rocky@100.100.100.99
 ```
 
 这样做的原因：
