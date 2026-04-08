@@ -290,6 +290,10 @@ install_system_deps() {
       libsox-fmt-all \
       curl \
       git \
+      fonts-wqy-zenhei \
+      unzip \
+      wget \
+      fontconfig \
       2>&1 | grep -E "(Setting up|Erasing|Processing|Unable|Error)" || true
     
     if [[ $? -eq 0 ]]; then
@@ -297,7 +301,65 @@ install_system_deps() {
     else
       warn "部分系统包安装失败，尝试继续..."
     fi
+
+    # ── 可选：安装 OPPO Sans 字体（更美观的中英文显示）────────────────
+    install_oppo_sans
   fi
+}
+
+install_oppo_sans() {
+  if [[ "$IS_MAC" == "true" ]]; then
+    return
+  fi
+  local OPPO_FONT_PATH="/usr/share/fonts/truetype/oppo/OPPOSans4.ttf"
+  if [[ -f "$OPPO_FONT_PATH" ]]; then
+    info "OPPO Sans 已安装，跳过"
+    return
+  fi
+
+  echo ""
+  echo "──────────────────────────────────────────────────────"
+  echo "  字体选项：OPPO Sans 4.0（推荐，更美观的中文字体）"
+  echo "  - 如已安装文泉驿字体，也可跳过"
+  echo "──────────────────────────────────────────────────────"
+  echo -n "  安装 OPPO Sans 4.0？[Y/n]: "
+  read -r want_oppo
+  want_oppo="${want_oppo:-Y}"
+  if [[ ! "$want_oppo" =~ ^[Yy]$ ]]; then
+    info "跳过 OPPO Sans，将使用文泉驿字体"
+    return
+  fi
+
+  local OPPO_ZIP_URL="https://coloros-website-cn.allawnfs.com/font/OPPO_Sans_4.0.zip"
+  local TMP_ZIP="/tmp/oppo_sans_4.zip"
+  local TMP_DIR="/tmp/oppo_sans_extract"
+
+  info "下载 OPPO Sans 4.0..."
+  if ! wget -q --show-progress -O "$TMP_ZIP" "$OPPO_ZIP_URL" 2>&1; then
+    warn "OPPO Sans 下载失败，跳过。将使用文泉驿字体作为后备"
+    return
+  fi
+
+  info "解压并安装字体..."
+  rm -rf "$TMP_DIR"
+  mkdir -p "$TMP_DIR"
+  unzip -q "$TMP_ZIP" -d "$TMP_DIR" 2>&1 || true
+  rm -f "$TMP_ZIP"
+
+  local ttf_file
+  ttf_file=$(find "$TMP_DIR" -name "*.ttf" | head -1)
+  if [[ -z "$ttf_file" ]]; then
+    warn "解压后未找到 TTF 文件，跳过 OPPO Sans"
+    rm -rf "$TMP_DIR"
+    return
+  fi
+
+  check_sudo
+  sudo mkdir -p "$(dirname "$OPPO_FONT_PATH")"
+  sudo cp "$ttf_file" "$OPPO_FONT_PATH"
+  sudo fc-cache -f "$(dirname "$OPPO_FONT_PATH")" 2>/dev/null || true
+  rm -rf "$TMP_DIR"
+  log "OPPO Sans 4.0 安装完成 → $OPPO_FONT_PATH"
 }
 
 # ── 安装 Python 依赖 ───────────────────────────────────────────

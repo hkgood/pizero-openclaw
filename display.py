@@ -32,11 +32,13 @@ def _pick_font(candidates: list[str]) -> str:
     return candidates[-1]
 
 _FONT_PATH = _pick_font([
-    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+    "/usr/share/fonts/truetype/oppo/OPPOSans4.ttf",        # OPPO Sans 4.0 (优先，支持中英文)
+    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",        # 文泉驿正黑（备选）
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
 ])
 _FONT_PATH_REGULAR = _pick_font([
-    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+    "/usr/share/fonts/truetype/oppo/OPPOSans4.ttf",        # OPPO Sans 4.0
+    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",        # 文泉驿正黑（备选）
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
 ])
 _EMOJI_FONT_PATHS = [
