@@ -504,6 +504,7 @@ class Assistant:
         self._dismiss.set()
         log.info("button pressed -- start recording")
         if self._tts:
+            self._tts.cancel()  # 立即停止 TTS，防止麦克风录进扬声器的声音
             self.display.start_character("listening", self._tts)
         else:
             self.display.set_status(
@@ -636,15 +637,17 @@ class Assistant:
             if not self._tts:
                 self.display.append_response(delta)
 
-            # Streaming TTS: batch 2–3 sentences for natural flow
+            # Streaming TTS: batch sentences for natural flow
+            # Supports both ASCII (. ! ?) and Chinese (。 ！ ？) punctuation
             if self._tts:
                 tts_buffer += delta
-                sentence_ends = list(re.finditer(r"[.!?]\s|\n", tts_buffer))
+                sentence_ends = list(re.finditer(r"[.!?。！？]\s?|\n", tts_buffer))
                 if len(sentence_ends) >= 2:
                     cut = sentence_ends[1].end()
                     chunk = tts_buffer[:cut].strip()
                     tts_buffer = tts_buffer[cut:]
                     if chunk:
+                        log.info("[tts] submit chunk (%d chars): %s", len(chunk), chunk[:60])
                         self._tts.submit(chunk)
 
         # Stale worker: exit without touching display, TTS, or history
@@ -656,6 +659,7 @@ class Assistant:
         # Submit remaining TTS buffer and wait for playback to finish
         if self._tts:
             if tts_buffer.strip():
+                log.info("[tts] submit final chunk (%d chars): %s", len(tts_buffer.strip()), tts_buffer.strip()[:60])
                 self._tts.submit(tts_buffer.strip())
             self._tts.flush()
             self.display.stop_character()
