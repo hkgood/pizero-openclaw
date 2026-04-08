@@ -395,10 +395,6 @@ class Assistant:
     def __init__(self):
         config.print_config()
 
-        # ── 启动时检查 OpenClaw Gateway 连通性 ────────────────────────────
-        if not _TEST_MODE:
-            self._check_openclaw_connectivity()
-
         self.display = Display(backlight=config.LCD_BACKLIGHT)
         self.recorder = Recorder()
         # 测试模式用 _SocketDisplay，没有 .board 属性，ButtonPTT 忽略 board
@@ -694,6 +690,12 @@ class Assistant:
     def run(self):
         self._go_idle()
         log.info("assistant ready -- press button to talk")
+
+        # 后台检查 OpenClaw 连通性，结果同步到龙虾图标（不阻塞启动）
+        if not _TEST_MODE:
+            threading.Thread(
+                target=self._check_openclaw_connectivity, daemon=True
+            ).start()
 
         try:
             while not self._shutdown.is_set():
