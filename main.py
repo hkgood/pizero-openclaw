@@ -434,6 +434,9 @@ class Assistant:
             req = urllib.request.Request(url)
             urllib.request.urlopen(req, timeout=config.OPENCLAW_HEALTHCHECK_TIMEOUT_MS / 1000.0)
             log.info("OpenClaw gateway reachable: %s", config.OPENCLAW_BASE_URL)
+            # 更新屏幕龙虾图标为已连接状态
+            if hasattr(self, "display") and hasattr(self.display, "set_openclaw_connected"):
+                self.display.set_openclaw_connected(True)
         except Exception as e:
             log.warning(
                 "OpenClaw gateway not reachable at %s: %s\n"
@@ -443,6 +446,9 @@ class Assistant:
                 "  - Is the URL correct? (current: %s)",
                 config.OPENCLAW_BASE_URL, e, config.OPENCLAW_BASE_URL,
             )
+            # 更新屏幕龙虾图标为未连接状态
+            if hasattr(self, "display") and hasattr(self.display, "set_openclaw_connected"):
+                self.display.set_openclaw_connected(False)
 
     def _is_stale(self, my_gen: int) -> bool:
         return self._worker_gen != my_gen
@@ -505,14 +511,7 @@ class Assistant:
         log.info("button pressed -- start recording")
         if self._tts:
             self._tts.cancel()  # 立即停止 TTS，防止麦克风录进扬声器的声音
-            self.display.start_character("listening", self._tts)
-        else:
-            self.display.set_status(
-                "Listening...",
-                color=(140, 200, 255),
-                subtitle="Speak now",
-                accent_color=(60, 140, 255),
-            )
+        self.display.start_character("listening", self._tts)
         if not _TEST_MODE:
             try:
                 self.recorder.start()
@@ -571,13 +570,7 @@ class Assistant:
                 log.info("silence detected (RMS=%.0f), skipping", rms)
                 if self._is_stale(my_gen):
                     return
-                self.display.stop_character()
-                self.display.set_status(
-                    "No speech detected",
-                    color=(160, 160, 160),
-                    subtitle="Try again",
-                    accent_color=(80, 80, 80),
-                )
+                self.display.set_character_state("sleep")
                 time.sleep(1.5)
                 if not self._is_stale(my_gen):
                     self._go_idle()
@@ -589,15 +582,7 @@ class Assistant:
             # --- Transcribe ---
             self._state_entered_at = time.monotonic()
             self.ptt.state = State.TRANSCRIBING
-            if self._tts:
-                self.display.set_character_state("thinking")
-            else:
-                self.display.set_status(
-                    "Transcribing...",
-                    color=(255, 230, 100),
-                    subtitle="One moment",
-                    accent_color=(255, 180, 0),
-                )
+            self.display.set_character_state("thinking")
             t0 = time.monotonic()
             transcript = transcribe(wav_path)
             log.info("transcribe took %.1fs => %r", time.monotonic() - t0, (transcript[:80] if transcript else "(empty)"))
@@ -613,8 +598,7 @@ class Assistant:
             return
         self._state_entered_at = time.monotonic()
         self.ptt.state = State.THINKING
-        if not self._tts:
-            self.display.start_spinner("Thinking")
+        self.display.set_character_state("thinking")
 
         self.ptt.state = State.STREAMING
         first_token = True
@@ -627,15 +611,10 @@ class Assistant:
                 break
             if first_token:
                 log.info("first token after %.1fs", time.monotonic() - stream_t0)
-                if self._tts:
-                    self.display.set_character_state("talking")
-                else:
-                    self.display.stop_spinner()
-                    self.display.set_response_text("")
+                self.display.set_character_state("talking")
                 first_token = False
             full_response += delta
-            if not self._tts:
-                self.display.append_response(delta)
+            self.display.append_response(delta)
 
             # Streaming TTS: batch sentences for natural flow
             # Supports both ASCII (. ! ?) and Chinese (。 ！ ？) punctuation
@@ -662,10 +641,9 @@ class Assistant:
                 log.info("[tts] submit final chunk (%d chars): %s", len(tts_buffer.strip()), tts_buffer.strip()[:60])
                 self._tts.submit(tts_buffer.strip())
             self._tts.flush()
-            self.display.stop_character()
-            self.display.set_response_text(full_response)
-        else:
-            self.display.flush_response()
+        # 说完话：切换到 happy 状态短暂停留，然后 _go_idle 接管
+        self.display.set_character_state("done")
+        self.display.set_response_text(full_response)
 
         log.info("response complete -- holding on screen")
 
@@ -699,13 +677,18 @@ class Assistant:
     def _show_error(self, msg: str):
         self.ptt.state = State.ERROR
         self.display.stop_character()
-        self.display.set_status(
-            msg[:50] + ("..." if len(msg) > 50 else ""),
-            color=(255, 120, 120),
-            subtitle="Something went wrong",
-            accent_color=(200, 0, 0),
-        )
-        time.sleep(3)
+        # 胶囊眼睛模式：展示 error 状态动画
+        if getattr(self.display, "_eye", None) is not None:
+            self.display.start_character("error")
+            time.sleep(3)
+        else:
+            self.display.set_status(
+                msg[:50] + ("..." if len(msg) > 50 else ""),
+                color=(255, 120, 120),
+                subtitle="Something went wrong",
+                accent_color=(200, 0, 0),
+            )
+            time.sleep(3)
         self._go_idle()
 
     def run(self):

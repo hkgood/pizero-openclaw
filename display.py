@@ -17,6 +17,13 @@ from PIL import Image, ImageDraw, ImageFont
 
 import config
 
+# ── 新版胶囊眼睛渲染器 ───────────────────────────────────────────────────────
+try:
+    from eye_renderer import EyeRenderer as _EyeRenderer
+    _HAS_EYE_RENDERER = True
+except ImportError:
+    _HAS_EYE_RENDERER = False
+
 # Resolve WhisPlay driver path: env var override > ~/.Whisplay/Driver > fallback
 _WHISPLAY_DRIVER_PATH = os.environ.get(
     "WHISPLAY_DRIVER_PATH",
@@ -597,12 +604,24 @@ class Display:
         self._battery_thread.start()
         self._wifi_cached = False
 
+        # ── 胶囊眼睛渲染器 ───────────────────────────────────────────────
+        self._openclaw_connected = False   # OpenClaw 连接状态（龙虾图标）
+        if _HAS_EYE_RENDERER:
+            self._eye = _EyeRenderer()
+        else:
+            self._eye = None
+
         self.clear()
 
     def sleep(self):
         if self._sleeping:
             return
         self._sleeping = True
+        # 先展示 sleep 状态动画约 1.5 秒，再关背光
+        if self._eye is not None:
+            self.start_character("sleep")
+            time.sleep(1.5)
+            self._stop_animations()
         self.clear()
         self.board.set_backlight(0)
 
@@ -615,6 +634,20 @@ class Display:
     @property
     def is_sleeping(self) -> bool:
         return self._sleeping
+
+    def set_openclaw_connected(self, connected: bool):
+        """更新 OpenClaw 连接状态（影响右上角龙虾图标颜色）。"""
+        self._openclaw_connected = connected
+
+    def _wifi_bars(self) -> int:
+        """将 0-100% 信号强度转换为 0-3 格显示（0=无信号，3=满格）。"""
+        if not self._wifi_online or self._wifi_strength <= 0:
+            return 0
+        if self._wifi_strength >= 67:
+            return 3
+        if self._wifi_strength >= 34:
+            return 2
+        return 1
 
     # ── 电池/WiFi 后台缓存（不阻塞 UI）──────────────────────────────────
     def _battery_loop(self):
@@ -900,42 +933,36 @@ class Display:
         self._cached_wrapped = []
 
     def set_idle_screen(self):
-        """Draw idle screen with clock, date, battery, and wifi status."""
-        img = Image.new("RGB", (self._width, self._height), (0, 0, 0))
-        draw = ImageDraw.Draw(img)
-
-        draw.rectangle((0, 0, self._width, ACCENT_BAR_HEIGHT), fill=(40, 40, 40))
-
-        # _draw_battery 内部已包含电池 + WiFi 状态，使用缓存值
-        self._draw_battery(draw)
-
-        now = datetime.now()
-
-        # Large clock
-        time_str = now.strftime("%H:%M")
-        tw = self._clock_font.getlength(time_str)
-        tx = int((self._width - tw) / 2)
-        ty = int(self._height * 0.22)
-        draw.text((tx, ty), time_str, font=self._clock_font, fill=(220, 220, 220))
-
-        # Date
-        date_str = now.strftime("%a, %b %d")
-        dw = self._status_sub_font.getlength(date_str)
-        dx = int((self._width - dw) / 2)
-        dy = ty + CLOCK_FONT_SIZE + 6
-        draw.text((dx, dy), date_str, font=self._status_sub_font, fill=(100, 100, 100))
-
-        # Subtitle
-        sub = "Press button to talk"
-        sw = self._status_sub_font.getlength(sub)
-        sx = int((self._width - sw) / 2)
-        sy = self._height - STATUS_SUB_FONT_SIZE - self._pad_y
-        draw.text((sx, sy), sub, font=self._status_sub_font, fill=(70, 70, 70))
-
-        self._draw(img)
+        """使用胶囊眼睛渲染器绘制 idle 状态（若可用），否则降级为时钟界面。"""
         self._response_buf = ""
         self._cached_paragraphs = []
         self._cached_wrapped = []
+        if self._eye is not None:
+            # 启动 idle 角色动画循环（如果还没在跑）
+            if not (hasattr(self, "_char_thread") and
+                    self._char_thread is not None and
+                    self._char_thread.is_alive()):
+                self.start_character("idle")
+            else:
+                self.set_character_state("idle")
+            return
+
+        # ── 降级：时钟界面 ────────────────────────────────────────────────
+        img = Image.new("RGB", (self._width, self._height), (0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        draw.rectangle((0, 0, self._width, ACCENT_BAR_HEIGHT), fill=(40, 40, 40))
+        self._draw_battery(draw)
+        now = datetime.now()
+        time_str = now.strftime("%H:%M")
+        tw = self._clock_font.getlength(time_str)
+        draw.text((int((self._width - tw) / 2), int(self._height * 0.22)),
+                  time_str, font=self._clock_font, fill=(220, 220, 220))
+        date_str = now.strftime("%a, %b %d")
+        dw = self._status_sub_font.getlength(date_str)
+        draw.text((int((self._width - dw) / 2),
+                   int(self._height * 0.22) + CLOCK_FONT_SIZE + 6),
+                  date_str, font=self._status_sub_font, fill=(100, 100, 100))
+        self._draw(img)
 
     # ── Sprite-based animated character ─────────────────────────────
 
@@ -965,13 +992,65 @@ class Display:
         if hasattr(self, "_char_thread"):
             self._char_thread.join(timeout=2)
 
+    # 状态映射：display 内部状态 → EyeRenderer 状态
+    _EYE_STATE_MAP = {
+        "idle":      "idle",
+        "listening": "listening",
+        "thinking":  "thinking",
+        "talking":   "talking",
+        "done":      "happy",
+        "happy":     "happy",
+        "sleep":     "sleep",
+        "error":     "error",
+    }
+
+    def _mouth_shape_to_amp(self, shape: int) -> float:
+        """将 TTS get_mouth_shape() 返回值（-1..3）映射为 0.0-1.0 幅度。"""
+        return {-1: 0.0, 0: 0.05, 1: 0.45, 2: 0.75, 3: 1.0}.get(shape, 0.0)
+
     def _character_loop(self):
+        """胶囊眼睛动画主循环：EyeRenderer → RGB565 → draw_image。"""
+        # 如果 EyeRenderer 不可用，降级为旧版精灵动画
+        if self._eye is None:
+            return self._character_loop_legacy()
+
+        from eye_renderer import FPS as EYE_FPS
+        frame_interval = 1.0 / EYE_FPS
+        tick = 0
+
+        while not self._char_stop.is_set():
+            state_key  = self._char_state
+            eye_state  = self._EYE_STATE_MAP.get(state_key, "idle")
+            tts        = getattr(self, "_char_tts", None)
+
+            # 获取 TTS 音量幅度
+            amp = 0.0
+            if eye_state == "talking" and tts is not None:
+                amp = self._mouth_shape_to_amp(tts.get_mouth_shape())
+
+            img = self._eye.draw_frame(
+                state        = eye_state,
+                tick         = tick,
+                amplitude    = amp,
+                wifi_strength= self._wifi_bars(),
+                sys_connected= self._openclaw_connected,
+            )
+
+            # 缩放到实际屏幕尺寸（若屏幕非 240×240）
+            if img.size != (self._width, self._height):
+                img = img.resize((self._width, self._height), Image.NEAREST)
+
+            self._draw(img)
+            tick += 1
+            self._char_stop.wait(timeout=frame_interval)
+
+    def _character_loop_legacy(self):
+        """旧版精灵动画（EyeRenderer 不可用时的降级实现）。"""
         tick = 0
         while not self._char_stop.is_set():
             state = self._char_state
             tts = getattr(self, "_char_tts", None)
 
-            # Select sprite frame key
             if state == "talking":
                 mouth = tts.get_mouth_shape() if tts else -1
                 key = f"talk{mouth}" if mouth >= 0 else "talk0"
@@ -984,16 +1063,11 @@ class Display:
             else:
                 key = "idle"
 
-            # Blink every ~4 s — skip for listening (attentive) and done (happy eyes)
             if (tick % 40) in (0, 1) and state not in ("listening", "done"):
                 key += "_blink"
 
             sprite = self._sprite_frames.get(key, self._sprite_frames["idle"])
-
-            # Gentle bob for idle / done states
-            bob_px = 0
-            if state in ("idle", "done"):
-                bob_px = _BOB_CYCLE[tick % len(_BOB_CYCLE)]
+            bob_px = _BOB_CYCLE[tick % len(_BOB_CYCLE)] if state in ("idle", "done") else 0
 
             if bob_px > 0:
                 img = Image.new("RGB", (self._width, self._height), (0, 0, 0))
@@ -1002,47 +1076,12 @@ class Display:
                 img = sprite.copy()
 
             draw = ImageDraw.Draw(img)
-
             draw.rectangle(
                 (0, 0, self._width, ACCENT_BAR_HEIGHT),
                 fill=self._ACCENT_COLORS.get(state, (40, 40, 40)),
             )
-
-            label = {"listening": "Listening…", "thinking": "Thinking…"}.get(state, "")
-            if label:
-                lw = self._status_sub_font.getlength(label)
-                draw.text(
-                    (int((self._width - lw) / 2), 200),
-                    label, font=self._status_sub_font, fill=(120, 120, 120),
-                )
-
-            # Subtitle: single line showing the current fragment being spoken
-            sub_text = ""
-            if tts:
-                sub_text = tts.current_text
-            if sub_text:
-                sub_text = _clean_markdown(sub_text)
-                usable_w = self._width - self._pad_x * 2
-                sub_font = self._response_font
-                sub_y = 200
-                draw.rectangle(
-                    (0, sub_y - 2, self._width, self._height),
-                    fill=(0, 0, 0),
-                )
-                sub_text = self._truncate_text(
-                    sub_text, sub_font, usable_w, self._emoji_response,
-                )
-                sw = self._text_width_mixed(sub_text, sub_font, self._emoji_response)
-                sx = max(self._pad_x, int((self._width - sw) / 2))
-                self._draw_mixed(
-                    draw, (sx, sub_y), sub_text,
-                    sub_font, self._emoji_response, (255, 255, 255),
-                    max_x=self._width - self._pad_x,
-                )
-
             self._draw_battery(draw)
             self._draw(img)
-
             tick += 1
             self._char_stop.wait(timeout=0.1)
 
@@ -1051,7 +1090,12 @@ class Display:
         self.stop_spinner()
         self.stop_character()
 
-    def start_spinner(self, label: str = "Thinking", color: tuple[int, int, int] = (255, 220, 50)):
+    def start_spinner(self, label: str = "Thinking",
+                      color: tuple[int, int, int] = (255, 220, 50)):
+        """显示思考中动画（胶囊眼睛 thinking 状态，或降级为文字 spinner）。"""
+        if self._eye is not None:
+            self.start_character("thinking")
+            return
         self._spinner_stop = threading.Event()
         t = threading.Thread(target=self._spin_loop, args=(label, color), daemon=True)
         t.start()
@@ -1088,18 +1132,19 @@ class Display:
             self._spinner_stop.wait(timeout=0.12)
 
     def set_response_text(self, text: str):
-        """Draw full wrapped response text, scrolled to bottom."""
+        """记录响应文本。胶囊眼睛模式下由 TTS 角色动画驱动，不单独绘制文字。"""
         self._response_buf = text
         self._cached_paragraphs = []
         self._cached_wrapped = []
-        self._render_response(force=True)
+        if self._eye is None:
+            self._render_response(force=True)
 
     def append_response(self, delta: str):
-        """Append a streaming delta and redraw (throttled)."""
+        """追加流式响应片段。胶囊眼睛模式下只缓存文本，不覆盖角色动画。"""
         was_empty = not self._response_buf
         self._response_buf += delta
-        # First token: show immediately; later tokens throttled by _min_draw_interval
-        self._render_response(force=was_empty)
+        if self._eye is None:
+            self._render_response(force=was_empty)
 
     def _render_response(self, force: bool = False):
         now = time.monotonic()
@@ -1181,8 +1226,9 @@ class Display:
         self._draw(img)
 
     def flush_response(self):
-        """Force a final redraw of buffered response text."""
-        self._render_response(force=True)
+        """最终刷新响应文本。胶囊眼睛模式下跳过文字绘制。"""
+        if self._eye is None:
+            self._render_response(force=True)
 
     def update_text(self, text: str):
         """Legacy: draw centred text."""
