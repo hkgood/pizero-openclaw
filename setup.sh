@@ -372,33 +372,59 @@ configure_api_keys() {
     configure_openai
   fi
 
-  # ── OpenClaw Token ─────────────────────────────────────────────
-  if [[ "$NON_INTERACTIVE" == "true" && -z "$OPENCLAW_TOKEN" ]]; then
-    warn "OPENCLAW_TOKEN 未设置，跳过（稍后手动配置 .env）"
-  else
-    echo ""
-    if [[ "$NON_INTERACTIVE" == "true" ]]; then
-      _write_env "OPENCLAW_TOKEN" "$OPENCLAW_TOKEN"
-    else
-      echo -e "${CYAN}OpenClaw Gateway 配置:${NC}"
-      echo -n "OpenClaw Token (可在 http://localhost:18789 配置页获取): "
-      read token
-      echo ""
-      if [[ -n "$token" ]]; then
-        _write_env "OPENCLAW_TOKEN" "$token"
-      fi
+  # ── OpenClaw 共享认证 ───────────────────────────────────────────
+  echo ""
+  if [[ "$NON_INTERACTIVE" == "true" ]]; then
+    if [[ -z "$OPENCLAW_TOKEN" && -z "$OPENCLAW_PASSWORD" ]]; then
+      warn "OPENCLAW_TOKEN / OPENCLAW_PASSWORD 都未设置，跳过（稍后手动配置 .env）"
     fi
+    _write_env_force "OPENCLAW_TOKEN" "${OPENCLAW_TOKEN:-}"
+    _write_env_force "OPENCLAW_PASSWORD" "${OPENCLAW_PASSWORD:-}"
+  else
+    echo -e "${CYAN}OpenClaw Gateway 配置:${NC}"
+    echo "推荐按官方 3.31+ 方式：Gateway 保持 loopback，只在本机或 SSH 隧道的 127.0.0.1 上访问。"
+    echo "客户端会同时携带共享认证 + device identity。首次连接可能进入待批准配对，批准一次后即可稳定重连。"
+    echo "共享认证二选一即可：如果服务端是 auth.mode=password，请填 Password；如果是 token，请填 Token。"
+    echo -n "OpenClaw Token（可留空）: "
+    read token
+    _write_env_force "OPENCLAW_TOKEN" "$token"
+    echo -n "OpenClaw Password（可留空）: "
+    read -r -s password
+    echo ""
+    _write_env_force "OPENCLAW_PASSWORD" "$password"
   fi
 
   # ── OpenClaw Base URL ──────────────────────────────────────────
-  local base_url="${OPENCLAW_BASE_URL:-http://localhost:18789}"
+  local base_url="${OPENCLAW_BASE_URL:-http://127.0.0.1:18789}"
   if [[ "$NON_INTERACTIVE" == "false" ]]; then
     echo ""
     echo -e "${CYAN}OpenClaw Gateway 地址:${NC}"
+    echo "如果是远程 Gateway，推荐先建立 SSH 隧道，再保持这里为 http://127.0.0.1:18789"
     read -p "OpenClaw Base URL [$base_url]: " input_url
     base_url="${input_url:-$base_url}"
   fi
   _write_env "OPENCLAW_BASE_URL" "$base_url"
+  _write_env_force "OPENCLAW_PROTOCOL_VERSION" "${OPENCLAW_PROTOCOL_VERSION:-3}"
+  _write_env_force "OPENCLAW_CLIENT_ID" "${OPENCLAW_CLIENT_ID:-cli}"
+  _write_env_force "OPENCLAW_CLIENT_MODE" "${OPENCLAW_CLIENT_MODE:-cli}"
+  _write_env_force "OPENCLAW_CLIENT_VERSION" "${OPENCLAW_CLIENT_VERSION:-1.0.0}"
+  _write_env_force "OPENCLAW_ROLE" "${OPENCLAW_ROLE:-operator}"
+  _write_env_force "OPENCLAW_SCOPES" "${OPENCLAW_SCOPES:-operator.read,operator.write}"
+  _write_env_force "OPENCLAW_LOCALE" "${OPENCLAW_LOCALE:-zh-CN}"
+  _write_env_force "OPENCLAW_USER_AGENT" "${OPENCLAW_USER_AGENT:-pizero-openclaw/1.0.0}"
+  _write_env_force "OPENCLAW_DEVICE_FAMILY" "${OPENCLAW_DEVICE_FAMILY:-raspberry-pi-zero-2w}"
+  _write_env_force "OPENCLAW_USE_DEVICE_IDENTITY" "${OPENCLAW_USE_DEVICE_IDENTITY:-true}"
+  _write_env_force "OPENCLAW_IDENTITY_FILE" "${OPENCLAW_IDENTITY_FILE:-~/.openclaw/identity/device.json}"
+  _write_env_force "OPENCLAW_DEVICE_TOKEN_FILE" "${OPENCLAW_DEVICE_TOKEN_FILE:-~/.openclaw/identity/device-auth.json}"
+  _write_env_force "OPENCLAW_PAIRING_STATE_FILE" "${OPENCLAW_PAIRING_STATE_FILE:-~/.openclaw/pizero/pairing-state.json}"
+  _write_env_force "OPENCLAW_SESSION_KEY" "${OPENCLAW_SESSION_KEY:-main}"
+  _write_env_force "OPENCLAW_ALLOW_SHARED_TOKEN_FALLBACK" "${OPENCLAW_ALLOW_SHARED_TOKEN_FALLBACK:-true}"
+  _write_env_force "OPENCLAW_CONNECT_TIMEOUT_MS" "${OPENCLAW_CONNECT_TIMEOUT_MS:-10000}"
+  _write_env_force "OPENCLAW_REQUEST_TIMEOUT_MS" "${OPENCLAW_REQUEST_TIMEOUT_MS:-30000}"
+  _write_env_force "OPENCLAW_STREAM_TIMEOUT_MS" "${OPENCLAW_STREAM_TIMEOUT_MS:-120000}"
+  _write_env_force "OPENCLAW_STREAM_EVENT_TIMEOUT_MS" "${OPENCLAW_STREAM_EVENT_TIMEOUT_MS:-15000}"
+  _write_env_force "OPENCLAW_HEALTHCHECK_TIMEOUT_MS" "${OPENCLAW_HEALTHCHECK_TIMEOUT_MS:-8000}"
+  _write_env_force "OPENCLAW_PING_INTERVAL_SEC" "${OPENCLAW_PING_INTERVAL_SEC:-15}"
 
   log "API 配置完成"
 }
@@ -409,6 +435,17 @@ _write_env() {
   if [[ -z "$value" ]]; then
     return
   fi
+  if grep -q "^export $key=" "$REPO_DIR/.env" 2>/dev/null; then
+    sed -i.bak "s|^export $key=.*|export $key=\"$value\"|" "$REPO_DIR/.env"
+  elif grep -q "^$key=" "$REPO_DIR/.env" 2>/dev/null; then
+    sed -i.bak "s|^$key=.*|$key=\"$value\"|" "$REPO_DIR/.env"
+  else
+    echo "export $key=\"$value\"" >> "$REPO_DIR/.env"
+  fi
+}
+
+_write_env_force() {
+  local key="$1" value="$2"
   if grep -q "^export $key=" "$REPO_DIR/.env" 2>/dev/null; then
     sed -i.bak "s|^export $key=.*|export $key=\"$value\"|" "$REPO_DIR/.env"
   elif grep -q "^$key=" "$REPO_DIR/.env" 2>/dev/null; then
@@ -618,17 +655,6 @@ setup_autostart() {
   # 预检 sudo
   check_sudo
   
-  # ── 修复 .env 格式（去掉 export 前缀，让 systemd EnvironmentFile 能正确读取）───
-  if [[ -f "$REPO_DIR/.env" ]]; then
-    local env_fixed=false
-    if grep -q "^export " "$REPO_DIR/.env" 2>/dev/null; then
-      info "修复 .env 格式（去掉 export 前缀，使 systemd 可正确读取）..."
-      sed -i.bak "s/^export //g" "$REPO_DIR/.env"
-      log ".env 已修复，备份保存在 .env.bak"
-      env_fixed=true
-    fi
-  fi
-  
   local svc_file="$REPO_DIR/pizero-openclaw.service"
   if [[ ! -f "$svc_file" ]]; then
     warn "未找到 $svc_file，跳过自启动设置"
@@ -646,8 +672,7 @@ setup_autostart() {
     -e "s|^User=.*|User=$current_user|" \
     -e "s|^Group=.*|Group=$current_group|" \
     -e "s|^WorkingDirectory=.*|WorkingDirectory=$REPO_DIR|" \
-    -e "s|^ExecStart=.*|ExecStart=/usr/bin/python3 $REPO_DIR/main.py|" \
-    -e "s|^EnvironmentFile=.*|EnvironmentFile=$REPO_DIR/.env|" \
+    -e "s|^ExecStart=.*|ExecStart=$REPO_DIR/run-openclaw.sh|" \
     "$svc_file" > "$svc_tmp"
   
   echo ""

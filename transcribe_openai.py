@@ -75,7 +75,35 @@ class _FunASRCallback:
         if "text" in sentence:
             text = sentence["text"].strip()
             if text:
-                self._texts.append(text)
+                self._merge_text(text)
+
+    def _merge_text(self, text: str) -> None:
+        """Keep only the latest version of an incremental FunASR chunk."""
+        if not self._texts:
+            self._texts.append(text)
+            return
+
+        last = self._texts[-1]
+        if text == last:
+            return
+
+        # FunASR realtime callbacks often resend the current sentence with
+        # more characters. Replace the tail chunk instead of appending it.
+        if text.startswith(last) or last.startswith(text):
+            self._texts[-1] = text if len(text) >= len(last) else last
+            return
+
+        # Handle partial overlap such as:
+        #   "快 测试"
+        #   "测试 测试测试"
+        # by merging the suffix instead of duplicating the shared prefix.
+        max_overlap = min(len(last), len(text))
+        for overlap in range(max_overlap, 0, -1):
+            if last.endswith(text[:overlap]):
+                self._texts[-1] = last + text[overlap:]
+                return
+
+        self._texts.append(text)
 
     @property
     def texts(self) -> list[str]:

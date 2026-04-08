@@ -427,18 +427,19 @@ class Assistant:
     def _check_openclaw_connectivity(self):
         """启动时检查 OpenClaw Gateway 是否可达，不可达则提示用户。"""
         import urllib.request
-        url = config.OPENCLAW_BASE_URL.rstrip("/") + "/v1/models"
+        # 新版 Gateway 的 /v1/models 不能稳定代表 WebSocket 可用性，
+        # 统一改为更轻量的 /health 探活。
+        url = config.OPENCLAW_BASE_URL.rstrip("/") + "/health"
         try:
             req = urllib.request.Request(url)
-            if config.OPENCLAW_TOKEN:
-                req.add_header("Authorization", f"Bearer {config.OPENCLAW_TOKEN}")
-            urllib.request.urlopen(req, timeout=5)
+            urllib.request.urlopen(req, timeout=config.OPENCLAW_HEALTHCHECK_TIMEOUT_MS / 1000.0)
             log.info("OpenClaw gateway reachable: %s", config.OPENCLAW_BASE_URL)
         except Exception as e:
             log.warning(
                 "OpenClaw gateway not reachable at %s: %s\n"
                 "  - Is the OpenClaw gateway running? (openclaw gateway start)"
-                "  - Is OPENCLAW_TOKEN configured in .env?\n"
+                "  - If you are using the official remote setup, is the SSH tunnel up?\n"
+                "  - Is OPENCLAW_TOKEN or OPENCLAW_PASSWORD configured in .env?\n"
                 "  - Is the URL correct? (current: %s)",
                 config.OPENCLAW_BASE_URL, e, config.OPENCLAW_BASE_URL,
             )
@@ -558,7 +559,6 @@ class Assistant:
                 log.info("empty input, returning to idle")
                 self._go_idle()
                 return
-            log.info("test input: %r", transcript[:80])
             log.info("test input: %r", transcript[:80])
         else:
             # --- 真实硬件模式：录音 → 转写 ---

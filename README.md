@@ -13,7 +13,7 @@
 
 1. **按住按钮** 通过 ALSA 录音
 2. **松开** — WAV 发送至 FunASR 进行语音转文字 (~0.7s)
-3. 文字（带对话历史）发送至 **OpenClaw gateway** 流式获取回复
+3. 文字发送至 **OpenClaw Gateway**，通过新版 WebSocket `chat.send` 流式获取回复
 4. 回复文字实时流式显示在 **LCD** 上，精确像素级自动换行
 5. 句子完成后通过 **Qwen TTS** 朗读回复
 6. 空闲屏幕显示 **时钟、日期、电量、WiFi 状态**
@@ -40,14 +40,16 @@ curl -fsSL https://raw.githubusercontent.com/hkgood/pizero-openclaw/main/install
 
 **非交互式安装（CI / 自动化）：**
 ```bash
-DASHSCOPE_API_KEY=your-key OPENCLAW_TOKEN=your-token \
+DASHSCOPE_API_KEY=your-key OPENCLAW_PASSWORD=your-password \
   ./install.sh --non-interactive
 ```
 
 **环境变量说明：**
 - `DASHSCOPE_API_KEY` — 阿里云百炼 API Key
-- `OPENCLAW_TOKEN` — OpenClaw Gateway Token
-- `OPENCLAW_BASE_URL` — Gateway 地址（默认 `http://localhost:18789`）
+- `OPENCLAW_TOKEN` — OpenClaw Gateway Token（和服务端 `auth.mode=token` 对应）
+- `OPENCLAW_PASSWORD` — OpenClaw Gateway Password（和服务端 `auth.mode=password` 对应）
+- `OPENCLAW_BASE_URL` — Gateway 地址。远程场景推荐保持 `http://127.0.0.1:18789`，通过 SSH 隧道转发。
+- `OPENCLAW_USE_DEVICE_IDENTITY` — 新版默认 `true`。首次连接可能生成待批准配对，批准一次后自动复用本地身份和 `deviceToken`
 - `INSTALL_BRANCH` — Git 分支（默认 `main`）
 - `ENABLE_AUTOSTART` — 非交互模式下自动设置 systemd 自启动（`true`）
 
@@ -132,13 +134,63 @@ cp .env.example .env
 # 阿里云百炼（默认，推荐）
 export DASHSCOPE_API_KEY="your-bailian-api-key"
 
-# OpenClaw（必填）
+# OpenClaw（共享认证二选一；真实密码只放本地 .env，不要提交）
+# token 模式：
 export OPENCLAW_TOKEN="your-openclaw-gateway-token"
+# password 模式：
+export OPENCLAW_PASSWORD="your-openclaw-gateway-password"
+
+# 官方推荐的远程方式：Gateway 保持 loopback，
+# 设备端通过 SSH 隧道访问本地 127.0.0.1:18789
+export OPENCLAW_BASE_URL="http://127.0.0.1:18789"
+# 3.31+ 推荐：共享认证 + device identity 一起使用
+export OPENCLAW_USE_DEVICE_IDENTITY="true"
+export OPENCLAW_IDENTITY_FILE="~/.openclaw/identity/device.json"
+export OPENCLAW_DEVICE_TOKEN_FILE="~/.openclaw/identity/device-auth.json"
+export OPENCLAW_PAIRING_STATE_FILE="~/.openclaw/pizero/pairing-state.json"
+export OPENCLAW_SESSION_KEY="main"
 ```
 
 > API Key 获取地址：
 > - 百炼：https://bailian.console.aliyun.com/
-> - OpenClaw：http://localhost:18789 配置页
+> - OpenClaw：http://127.0.0.1:18789 配置页（如果是远程 Gateway，请先建立 SSH 隧道）
+
+### 官方推荐的远程连接方式
+
+如果 OpenClaw Gateway 跑在另一台机器上，官方当前推荐：
+
+1. 让 Gateway 保持 `bind: "loopback"`
+2. 在设备端建立 SSH 隧道
+3. 设备端继续把 `OPENCLAW_BASE_URL` 设为 `http://127.0.0.1:18789`
+4. 在客户端握手里显式带上共享 `token` 或 `password`
+5. 同时附带本地 `device identity`，首次连接可能需要批准一次配对
+6. 配对完成后，客户端会把 Gateway 返回的 `deviceToken` 持久化到本地，后续重连更稳
+
+例如从 Pi Zero 连接 Orange Pi：
+
+```bash
+ssh -N -L 18789:127.0.0.1:18789 rocky@100.108.209.26
+```
+
+这样做的原因：
+
+- 不需要把 Gateway 直接暴露到 LAN/Tailnet 的 `18789`
+- 和最新 OpenClaw 文档的 `Remote over SSH` / `loopback + Serve` 策略一致
+- 能让 Pi Zero 走官方 3.31+ 的单次 `connect.challenge -> connect` 握手，而不是旧版双 `connect`
+- 首次接入时如果返回 `NOT_PAIRED`，请求会落到本地 `OPENCLAW_PAIRING_STATE_FILE`，方便查看 `requestId`
+- 一旦批准配对，后续就会稳定复用本地 `device identity` 和已缓存的 `deviceToken`
+
+### 首次配对会发生什么
+
+第一次把一台新的 Pi Zero 接到 Gateway 时，常见流程是：
+
+1. Pi Zero 建立 SSH 隧道并连接 Gateway
+2. Gateway 返回 `NOT_PAIRED`，同时生成待批准请求
+3. 客户端把这次请求写入 `OPENCLAW_PAIRING_STATE_FILE`
+4. 你在 Gateway 侧批准该设备
+5. Pi Zero 下次重连时成功拿到 `deviceToken`，之后进入稳定工作状态
+
+这属于正常行为，不是故障。
 
 ### 5. 运行
 
@@ -245,8 +297,14 @@ docker run --device /dev/snd:/dev/snd \
 | `OPENAI_TRANSCRIBE_MODEL` | `whisper-1` | OpenAI Whisper 模型 |
 | `OPENAI_TTS_MODEL` | `tts-1` | OpenAI TTS 模型 |
 | `OPENAI_TTS_VOICE` | `coral` | OpenAI TTS 音色 |
-| `OPENCLAW_TOKEN` | （必填）| OpenClaw Gateway Token |
-| `OPENCLAW_BASE_URL` | `http://localhost:18789` | OpenClaw Gateway 地址 |
+| `OPENCLAW_TOKEN` | — | OpenClaw Gateway Token（token 模式） |
+| `OPENCLAW_PASSWORD` | — | OpenClaw Gateway Password（password 模式） |
+| `OPENCLAW_BASE_URL` | `http://127.0.0.1:18789` | OpenClaw Gateway 地址；远程推荐配合 SSH 隧道 |
+| `OPENCLAW_USE_DEVICE_IDENTITY` | `true` | 3.31+ 推荐开启；首次接入可能需要批准一次配对 |
+| `OPENCLAW_IDENTITY_FILE` | `~/.openclaw/identity/device.json` | 本地设备身份文件 |
+| `OPENCLAW_DEVICE_TOKEN_FILE` | `~/.openclaw/identity/device-auth.json` | 已批准后缓存的 deviceToken |
+| `OPENCLAW_PAIRING_STATE_FILE` | `~/.openclaw/pizero/pairing-state.json` | 首次待批准配对状态文件 |
+| `OPENCLAW_SESSION_KEY` | `main` | `chat.send` 使用的会话键 |
 | `WHISPLAY_DRIVER_PATH` | `~/Whisplay/Driver` | WhisPlay 驱动路径 |
 | `ENABLE_TTS` | `true` | 是否开启语音朗读 |
 | `TEST_MODE` | `false` | 测试模式（无硬件时自动开启）|
@@ -296,6 +354,16 @@ pip3 install -r requirements-pi.txt
 rm -f ~/.local/state/pizero-openclaw.log
 ```
 
+### 首次连接报 `NOT_PAIRED`
+这是新版链路的正常首连状态，不是“密码模式不能连”。
+
+```bash
+# 查看本地记录下来的待批准请求
+cat ~/.openclaw/pizero/pairing-state.json
+```
+
+只要在 Gateway 侧批准这台设备一次，后续重连就会恢复正常。
+
 ### WhisPlay 按钮无反应
 可能是 GPIO 中断注册失败，WhisPlay 驱动会自动降级到轮询，不影响使用。
 
@@ -328,7 +396,7 @@ main.py               — 入口、流程编排、测试模式
 display.py            — LCD 渲染（状态、回复、时钟、精灵动画）
 display_mock.py       — 测试模式 WhisPlay 模拟接口
 gui_display.py        — 测试模式 GUI 窗口（Tkinter，独立进程）
-openclaw_client.py   — OpenClaw Gateway 流式 HTTP 客户端
+openclaw_client.py   — OpenClaw Gateway WebSocket 客户端（challenge / pairing / chat.send）
 transcribe_openai.py — 语音识别（FunASR / Whisper，自动重试）
 tts_openai.py        — 语音合成（Bailian Qwen TTS / OpenAI TTS）
 record_audio.py       — ALSA 录音，文件权限 600 保护隐私

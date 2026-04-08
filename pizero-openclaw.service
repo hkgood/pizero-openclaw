@@ -10,14 +10,10 @@ User=pi
 Group=pi
 # Path to the project (set to where you cloned pizero-openclaw)
 WorkingDirectory=/home/pi/pizero-openclaw
-# Python executable — use venv python if you created one, e.g.:
-#   ExecStart=/home/pi/pizero-openclaw/.venv/bin/python main.py
-ExecStart=/usr/bin/python3 /home/pi/pizero-openclaw/main.py
+# Always go through the wrapper so .env parsing stays consistent and remote
+# loopback/SSH-tunnel setups behave the same way in shell and systemd.
+ExecStart=/home/pi/pizero-openclaw/run-openclaw.sh
 # ───────────────────────────────────────────────────────────────────────────
-
-# Load env vars from .env (python-dotenv loads them in config.py;
-# systemd expects KEY=value without 'export', which .env.example has)
-EnvironmentFile=/home/pi/pizero-openclaw/.env
 
 # 自动重启：崩溃后重启 / 系统唤醒后重启
 Restart=always
