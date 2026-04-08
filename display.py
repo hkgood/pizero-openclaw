@@ -1040,6 +1040,29 @@ class Display:
             if img.size != (self._width, self._height):
                 img = img.resize((self._width, self._height), Image.NEAREST)
 
+            # ── 说话时：底部叠加当前正在朗读的文字 ───────────────────────
+            if eye_state == "talking" and tts is not None:
+                sub_text = tts.current_text
+                if sub_text:
+                    sub_text = _clean_markdown(sub_text)
+                    draw = ImageDraw.Draw(img)
+                    bar_y = self._height - 34
+                    draw.rectangle((0, bar_y, self._width, self._height),
+                                   fill=(10, 10, 18))
+                    sub_text = self._truncate_text(
+                        sub_text, self._response_font,
+                        self._width - self._pad_x * 2, self._emoji_response,
+                    )
+                    sw = self._text_width_mixed(
+                        sub_text, self._response_font, self._emoji_response)
+                    sx = max(self._pad_x, (self._width - int(sw)) // 2)
+                    self._draw_mixed(
+                        draw, (sx, bar_y + 8), sub_text,
+                        self._response_font, self._emoji_response,
+                        (200, 210, 225),
+                        max_x=self._width - self._pad_x,
+                    )
+
             self._draw(img)
             tick += 1
             self._char_stop.wait(timeout=frame_interval)
@@ -1132,15 +1155,17 @@ class Display:
             self._spinner_stop.wait(timeout=0.12)
 
     def set_response_text(self, text: str):
-        """记录响应文本。胶囊眼睛模式下由 TTS 角色动画驱动，不单独绘制文字。"""
+        """展示完整响应文字。胶囊眼睛模式下先停止角色动画，再整屏显示文字。"""
         self._response_buf = text
         self._cached_paragraphs = []
         self._cached_wrapped = []
-        if self._eye is None:
-            self._render_response(force=True)
+        if self._eye is not None:
+            # 停止动画，切回文字展示模式
+            self._stop_animations()
+        self._render_response(force=True)
 
     def append_response(self, delta: str):
-        """追加流式响应片段。胶囊眼睛模式下只缓存文本，不覆盖角色动画。"""
+        """追加流式响应片段。胶囊眼睛模式下只缓存，不打断角色动画；无眼睛时实时渲染。"""
         was_empty = not self._response_buf
         self._response_buf += delta
         if self._eye is None:
@@ -1226,9 +1251,8 @@ class Display:
         self._draw(img)
 
     def flush_response(self):
-        """最终刷新响应文本。胶囊眼睛模式下跳过文字绘制。"""
-        if self._eye is None:
-            self._render_response(force=True)
+        """最终刷新响应文本（无 TTS 时使用）。"""
+        self._render_response(force=True)
 
     def update_text(self, text: str):
         """Legacy: draw centred text."""
