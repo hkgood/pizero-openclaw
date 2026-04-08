@@ -13,16 +13,16 @@ SCALE = 3
 FPS   = 15
 
 # ── 眼睛（竖向胶囊，无眼珠）─────────────────────────────────────────────────
-EYE_W       = 34    # 胶囊宽度
-EYE_H       = 66    # 胶囊高度
-EYE_CY      = 98    # 眼睛垂直中心（上移为嘴留空间）
-EYE_L_CX    = 72    # 左眼水平中心
-EYE_R_CX    = 168   # 右眼水平中心
+EYE_W       = 31    # 胶囊宽度（原34 缩小约10%）
+EYE_H       = 60    # 胶囊高度（原66 缩小约10%）
+EYE_CY      = 98    # 眼睛垂直中心
+EYE_L_CX    = 64    # 左眼水平中心
+EYE_R_CX    = 176   # 右眼水平中心
 OUTLINE_W   = 3     # 描边粗细
 
 # ── 嘴巴 ─────────────────────────────────────────────────────────────────────
 MOUTH_CX    = W // 2   # 嘴巴水平中心
-MOUTH_CY    = 178      # 嘴巴垂直中心
+MOUTH_CY    = 172      # 嘴巴垂直中心（原178 上移6px）
 
 # ── 信号指示器（顶部居中，聆听/思考共用同一 Y 轴）──────────────────────────
 SIG_CX = W // 2   # 信号/思考点水平中心
@@ -564,9 +564,9 @@ class EyeRenderer:
     def _status_icons(self, img: Image.Image, draw: ImageDraw.ImageDraw,
                       state: str, wifi_strength: int, sys_connected: bool):
         """底部状态线 + 左上角 WiFi 图标（超采样）+ 右上角龙虾图标。"""
-        _draw_wifi_icon(img, x=4, y=3, strength=wifi_strength,
+        _draw_wifi_icon(img, x=12, y=7, strength=wifi_strength,
                         base_color=(55, 210, 100))
-        _draw_claw_icon(draw, rx=W - 4, y=4, connected=sys_connected)
+        _draw_claw_icon(draw, rx=W - 12, y=7, connected=sys_connected)
         draw.rectangle((0, H - 3, W, H), fill=ACCENT.get(state, ACCENT["idle"]))
 
     def _bottom_glow(self, img: Image.Image, state: str):
